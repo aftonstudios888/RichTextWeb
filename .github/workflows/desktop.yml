@@ -77,6 +77,25 @@ jobs:
         run: |
           dotnet run --project adapters/dotnet/Samples/WpfSmoke/RichTextWeb.WpfSmoke.csproj -c Release -- --smoke --assets "$env:GITHUB_WORKSPACE\artifacts\desktop\web" --report "$env:GITHUB_WORKSPACE\artifacts\desktop\smoke"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and exercise real WinUI WebView2
+        shell: pwsh
+        run: |
+          $project = 'adapters/dotnet/Samples/WinUiSmoke/RichTextWeb.WinUiSmoke.csproj'
+          msbuild $project /restore /t:Build /p:Configuration=Release /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $app = Get-ChildItem adapters/dotnet/Samples/WinUiSmoke/bin -Filter RichTextWeb.WinUiSmoke.exe -Recurse | Where-Object { $_.FullName -match 'Release' } | Select-Object -First 1
+          if (-not $app) { throw 'WinUI executable was not built' }
+          & $app.FullName --smoke --assets "$env:GITHUB_WORKSPACE\artifacts\desktop\web" --report "$env:GITHUB_WORKSPACE\artifacts\desktop\winui"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content artifacts/desktop/winui/winui-webview2.json -Raw | ConvertFrom-Json
+          if (-not $report.passed) { throw 'WinUI runtime checks failed' }
+      - name: Exercise real Avalonia NativeWebView
+        shell: pwsh
+        run: |
+          dotnet run --project adapters/dotnet/Samples/AvaloniaSmoke/RichTextWeb.AvaloniaSmoke.csproj -c Release -- --smoke --assets "$env:GITHUB_WORKSPACE\artifacts\desktop\web" --report "$env:GITHUB_WORKSPACE\artifacts\desktop\avalonia"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $report = Get-Content artifacts/desktop/avalonia/avalonia-webview.json -Raw | ConvertFrom-Json
+          if (-not $report.passed) { throw 'Avalonia runtime checks failed' }
       - name: Package native hosts and runnable WPF sample
         shell: pwsh
         run: |
@@ -87,6 +106,12 @@ jobs:
           dotnet publish adapters/dotnet/Samples/WpfSmoke/RichTextWeb.WpfSmoke.csproj -c Release --no-self-contained -o artifacts/desktop/wpf-sample
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item artifacts/desktop/web artifacts/desktop/wpf-sample/web -Recurse
+          dotnet publish adapters/dotnet/Samples/AvaloniaSmoke/RichTextWeb.AvaloniaSmoke.csproj -c Release --no-self-contained -o artifacts/desktop/avalonia-sample
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item artifacts/desktop/web artifacts/desktop/avalonia-sample/web -Recurse
+          msbuild adapters/dotnet/Samples/WinUiSmoke/RichTextWeb.WinUiSmoke.csproj /t:Publish /p:Configuration=Release /p:Platform=x64 /p:PublishDir="$env:GITHUB_WORKSPACE\artifacts\desktop\winui-sample\"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item artifacts/desktop/web artifacts/desktop/winui-sample/web -Recurse
       - uses: actions/upload-artifact@v7
         if: always()
         with:
