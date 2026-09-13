@@ -11,6 +11,8 @@ RichTextWeb 0.3.0 adds rich review and coauthoring, editable pages and floating 
 
 Install with `npm install @wieslawsoltes/richtextweb@0.3.0`. The main editor is standalone; optional PDF.js capabilities ship through `/pdf` with browser worker/font assets. Release archives contain browser builds, source, sample, native packages/apps/evidence and SHA-256 checksums. npm publication uses provenance and verifies the registry bytes against the immutable release archive.
 
+Release validation: **289 Node tests**, **87 Chromium groups**, installed ESM/CommonJS/TypeScript/standalone consumers, eight shared C# protocol groups and actual Windows WPF/WinUI/Avalonia runtime checks.
+
 The [verification report](https://github.com/wieslawsoltes/RichTextWeb/blob/main/docs/VERIFICATION.md) describes the actual automated checks. The [compatibility matrix](https://github.com/wieslawsoltes/RichTextWeb/blob/main/docs/COMPATIBILITY.md) records remaining boundaries: browser pagination is not Word-identical; WPF semantics are not exhaustive; coauthoring intent depends on stable Run identities; PDF replacement is limited by encodings and supported operators; physical devices, accessibility and non-Windows Avalonia runtimes need separate qualification.
 
 [Open Document Studio](https://wieslawsoltes.github.io/RichTextWeb/) · [API and integration](https://github.com/wieslawsoltes/RichTextWeb/blob/main/docs/INTEGRATION.md)

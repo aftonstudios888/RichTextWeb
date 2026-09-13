@@ -172,6 +172,13 @@ Responses echo the `id` and contain `result` or `{ "error": { "code": "...", "me
 | `deleteBackward`, `deleteForward`, `undo`, `redo` | Optional `expectedRevision`                                         |
 | `applyProperty`, `setParagraphProperty`           | `name`, `value`                                                     |
 | `execute`                                         | `command`, optional `parameter`                                     |
+| `moveSelection`                                   | `destination` UTF-16 offset before the move                         |
+| `moveBlocks`                                      | `ids` of contiguous sibling blocks, `parentId`, `index`             |
+| `setElementProperty`                              | `id`, `name`, `value`                                               |
+| `setTableProperty`, `setCellProperty`             | `name`, `value`; targets the current selection's table or cell      |
+| `mergeTableCells`                                 | Optional `count` (default 2); adjacent cells in the selected row    |
+| `splitTableCell`                                  | None; splits the selected cell's spans                              |
+| `editFloatingContent`                             | Figure/Floater `id`, canonical `blocks` array                       |
 | `getReviewState`                                  | None; returns tracking state, current author and revisions          |
 | `insertField`                                     | `type`, optional `argument`, `format`                               |
 | `updateFields`                                    | Optional `context`                                                  |
@@ -187,5 +194,21 @@ Field context is JSON data: `PageNumber`, `PageCount`, `Locale`, `FileName`, `Da
 Mail merge returns canonical JSON documents without changing the template. It remains available for read-only documents, caps each batch at 1,000 records and enforces the configured output-size budget. Split larger jobs into batches. `execute` also reaches the engine's `TrackChanges`, `CurrentAuthor`, `AcceptRevision`, `RejectRevision`, `AcceptAllRevisions` and `RejectAllRevisions` commands.
 
 All mutating methods accept optional `expectedRevision`; mismatch returns `revision_conflict`. Invalid documents, duplicate node IDs, unsupported node types, invalid offsets, excessive message size/depth, prototype keys, cycles and non-JSON values are rejected. The default input limit is 8 Mi UTF-16 code units, 100,000 document nodes and depth 64. `isReadOnly` is evaluated for each mutation. `HandleMessage` returns the response, while `Receive` also posts it. Invalid-envelope errors have `id: null`. Transport failures notify `TransportError`.
+
+Structural editing uses the same engine transactions, undo history and revision tracking as the reusable browser controls. `editFloatingContent` replaces an anchored story without changing its main-story object offset. It validates block hierarchy, properties and IDs before editing; replacement nodes may retain IDs from that story but may not reuse IDs elsewhere in the document. Existing story annotations are mapped to the replacement text. Native callers send canonical JSON blocks, never callbacks.
+
+The C# client exposes `MoveSelectionAsync`, `MoveBlocksAsync`, `SetElementPropertyAsync`, `SetTablePropertyAsync`, `SetCellPropertyAsync`, `MergeTableCellsAsync`, `SplitTableCellAsync` and `EditFloatingContentAsync`. Each accepts optional `expectedRevision` and a cancellation token. Property wrappers preserve explicit JSON `null` values. Revision-aware generic execution is also available through `ExecuteAsync(command, parameter, expectedRevision, token)`; existing overloads remain supported.
+
+```cs
+var state = await client.InvokeAsync("getState");
+long revision = state.GetProperty("revision").GetInt64();
+await client.SetElementPropertyAsync(figureId, "WrapDirection", "Both", revision);
+
+// blocksJson is a JSON array of canonical Paragraph/Table/etc. document nodes.
+using var blocks = JsonDocument.Parse(blocksJson);
+await client.EditFloatingContentAsync(figureId, blocks.RootElement);
+```
+
+Generic `execute` accepts the corresponding PascalCase command names and DTOs: `MoveBlocks` uses `{ Ids, ParentId, Index }`, element formatting uses `{ Id, Name, Value }`, table/cell formatting uses `{ Name, Value }`, and floating replacement uses `{ Id, Blocks }`. `MoveSelection` accepts a numeric offset or `{ Destination }`; `MergeTableCells` accepts a count or `{ Count }`. These aliases pass through the same validation and read-only/revision checks as the explicit methods. Put `expectedRevision` in the outer request parameters, alongside `command`, rather than inside its DTO.
 
 These adapters expose the implemented JavaScript engine through native host controls. Version 0.3 supplies packable native projects, a C# protocol suite against the actual Node engine, and executable Windows WPF, WinUI and Avalonia smoke applications with JSON and rendered evidence. The desktop workflow requires successful runtime reports before packaging; the checked commit's CI result is authoritative. The official Avalonia.Controls.WebView 11.4.0 dependency is MIT licensed. Avalonia runtime execution on Linux/macOS, physical input, screen readers and physical GPU testing still need separate platform qualification. See the [native build and qualification guide](../adapters/dotnet/README.md).

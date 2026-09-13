@@ -857,7 +857,12 @@ export class RichTextWebBridge implements IDisposable {
             .replace(/^(EditingCommands|ApplicationCommands)\./, "")
             .replace(/[\s_-]/g, "")
             .toLowerCase();
-          const structured = structuredEditingCommands[normalized];
+          const structured = Object.hasOwn(
+            structuredEditingCommands,
+            normalized,
+          )
+            ? structuredEditingCommands[normalized]
+            : undefined;
           if (structured) {
             const value = params.parameter;
             const parameter = record(value) ? value : {};

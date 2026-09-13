@@ -4,6 +4,8 @@ Verification uses Node.js 24.19.0, TypeScript 7.0.2 and Chromium 153 on Linux/x6
 
 ## Automated coverage
 
+The 0.3.0 release candidate passed **289 Node tests**, **87 real Chromium check groups**, and all four installed-consumer modes (ESM, CommonJS, strict TypeScript and standalone). CI repeats these checks on the exact release commit.
+
 The Node suites cover model ownership, dependency-property metadata and inheritance/coercion, live/snapshot positions and structural symbols, rich editing, patch history, observer failures, formatting/move/structural review, merged-cell geometry, rich concurrent operations, MVVM/React/bridge APIs, fields/notes/mail merge, format conversion, DOCX stories/native review/anchored text boxes, PDF flow export, and original PDF operator editing. The runner records the exact test count for each commit.
 
 Real Chromium checks include native typing, selection/caret, clipboard sanitation and stale asynchronous cut rejection, composition reconciliation, readonly guards, retained DOM identity, measured finite-page editing/navigation, columns, headers/footers/notes and overflow diagnostics. A 3,000-paragraph virtualization fixture verifies fewer than 60 retained paragraph elements, distant selection/edit/undo, complete native selection materialization and composition protection. Floating text-box stories, image handles, scoped rich editing, React Strict Mode, paginated React refs and MVVM document bindings exercise the shared controls.
