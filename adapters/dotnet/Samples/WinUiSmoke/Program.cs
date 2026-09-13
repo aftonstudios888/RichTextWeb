@@ -45,7 +45,8 @@ internal sealed class SmokeApplication : Application
                 await NativeSmoke.RunAsync(client, async code => await view.ExecuteScriptAsync(code), checks);
                 Directory.CreateDirectory(report);
                 using var image = File.Create(Path.Combine(report, "winui-webview2.png"));
-                await view.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, image);
+                using var randomAccessImage = image.AsRandomAccessStream();
+                await view.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, randomAccessImage);
                 checks.Add("Native WinUI WebView2 captured the rendered editor image");
                 await NativeSmoke.ReportAsync(report, "winui-webview2", true, checks);
                 Environment.ExitCode = 0; Exit();
