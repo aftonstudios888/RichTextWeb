@@ -258,6 +258,9 @@ export async function runWorkspaceBrowserChecks(page) {
     await page.waitForFunction(
       () => richTextStudio.workspace.Docking.Find("navigation").IsFloating,
     );
+    // Dockyard commits the model synchronously and renders the floating pane on
+    // its next animation frame. Wait for the user-visible result as well.
+    await page.locator(".navigation").waitFor({ state: "visible" });
     assert(await page.locator(".navigation").isVisible());
     assert.equal(
       await page.evaluate(

@@ -47,6 +47,67 @@ internal static class NativeSmoke
         await client.ExecuteAsync("RejectAllRevisions");
         Require(!(await client.InvokeAsync("getText")).GetString()!.Contains(" tracked"), "Reject revision");
         checks.Add("Tracked insertion and rejection executed through native commands");
+
+        await client.ExecuteAsync("TrackChanges", false);
+        using var floating = JsonDocument.Parse("""
+            {"type":"FlowDocument","id":"native-float-document","props":{},"children":[
+              {"type":"Paragraph","id":"native-body","props":{},"children":[
+                {"type":"Run","id":"native-before","props":{},"text":"Before "},
+                {"type":"Figure","id":"native-figure","props":{"Width":180},"children":[
+                  {"type":"Paragraph","id":"native-story","props":{},"children":[
+                    {"type":"Run","id":"native-story-text","props":{},"text":"Original story"}]}]},
+                {"type":"Run","id":"native-after","props":{},"text":" after"}]}]}
+            """);
+        await client.SetDocumentAsync(floating.RootElement);
+        await client.SetElementPropertyAsync("native-figure", "Width", 220);
+        await client.SetElementPropertyAsync("native-figure", "HorizontalAnchor", "ContentLeft");
+        using var story = JsonDocument.Parse("""
+            [{"type":"Paragraph","id":"native-rich-story","props":{},"children":[
+              {"type":"Bold","id":"native-story-bold","props":{},"children":[
+                {"type":"Run","id":"native-rich-text","props":{},"text":"Updated rich story"}]}]}]
+            """);
+        await client.EditFloatingContentAsync("native-figure", story.RootElement);
+        var figure = (await client.GetDocumentAsync()).GetProperty("children")[0].GetProperty("children")[1];
+        Require(figure.GetProperty("props").GetProperty("Width").GetInt32() == 220 &&
+            figure.GetProperty("props").GetProperty("HorizontalAnchor").GetString() == "ContentLeft", "Floating layout properties");
+        Require(figure.GetProperty("children")[0].GetProperty("children")[0].GetProperty("type").GetString() == "Bold" &&
+            figure.GetRawText().Contains("Updated rich story", StringComparison.Ordinal), "Rich floating story replacement");
+        Require((await client.InvokeAsync("getText")).GetString() == "Before \uFFFC after", "Atomic floating main-story offsets");
+        await client.UndoAsync();
+        Require((await client.GetDocumentAsync()).GetRawText().Contains("Original story", StringComparison.Ordinal), "Undo floating story");
+        await client.RedoAsync();
+        Require((await client.GetDocumentAsync()).GetRawText().Contains("Updated rich story", StringComparison.Ordinal), "Redo floating story");
+        checks.Add("C# floating layout and rich-story wrappers preserved formatting, atomic main text and undo/redo");
+
+        using var table = JsonDocument.Parse("""
+            {"type":"FlowDocument","id":"native-table-document","props":{},"children":[
+              {"type":"Paragraph","id":"native-first","props":{},"children":[{"type":"Run","id":"native-first-text","props":{},"text":"First block"}]},
+              {"type":"Paragraph","id":"native-second","props":{},"children":[{"type":"Run","id":"native-second-text","props":{},"text":"Second block"}]},
+              {"type":"Table","id":"native-table","props":{},"children":[
+                {"type":"TableRowGroup","id":"native-group","props":{},"children":[
+                  {"type":"TableRow","id":"native-row","props":{},"children":[
+                    {"type":"TableCell","id":"native-left","props":{},"children":[{"type":"Paragraph","id":"native-left-paragraph","props":{},"children":[{"type":"Run","id":"native-left-text","props":{},"text":"Left cell"}]}]},
+                    {"type":"TableCell","id":"native-right","props":{},"children":[{"type":"Paragraph","id":"native-right-paragraph","props":{},"children":[{"type":"Run","id":"native-right-text","props":{},"text":"Right cell"}]}]}]}]}]}]}
+            """);
+        await client.SetDocumentAsync(table.RootElement);
+        await client.ExecuteAsync("TrackChanges", true);
+        int cellStart = (await client.InvokeAsync("getText")).GetString()!.IndexOf("Left cell", StringComparison.Ordinal);
+        Require(cellStart >= 0, "Locate table selection");
+        await client.SelectAsync(cellStart, cellStart);
+        await client.MergeTableCellsAsync(2);
+        var cells = (await client.GetDocumentAsync()).GetProperty("children")[2].GetProperty("children")[0].GetProperty("children")[0].GetProperty("children");
+        Require(cells.GetArrayLength() == 1 && cells[0].GetProperty("props").GetProperty("ColumnSpan").GetInt32() == 2, "Merged table geometry");
+        Require((await client.GetReviewStateAsync()).GetProperty("revisions").GetArrayLength() == 1, "Tracked native table merge");
+        await client.ExecuteAsync("RejectAllRevisions");
+        cells = (await client.GetDocumentAsync()).GetProperty("children")[2].GetProperty("children")[0].GetProperty("children")[0].GetProperty("children");
+        Require(cells.GetArrayLength() == 2 && cells[1].GetProperty("id").GetString() == "native-right", "Reject merged table preserves cells");
+        await client.MoveBlocksAsync(new[] { "native-first" }, "native-table-document", 3);
+        Require((await client.GetDocumentAsync()).GetProperty("children")[2].GetProperty("id").GetString() == "native-first", "Move blocks preserves identity");
+        Require((await client.GetReviewStateAsync()).GetProperty("revisions").GetArrayLength() == 1, "Tracked native block move");
+        await client.ExecuteAsync("RejectAllRevisions");
+        Require((await client.GetDocumentAsync()).GetProperty("children")[0].GetProperty("id").GetString() == "native-first", "Reject block move restores order");
+        await client.ExecuteAsync("TrackChanges", false);
+        checks.Add("C# table merge and block-move wrappers recorded revisions and restored structure on rejection");
     }
     public static Task ReportAsync(string directory, string host, bool passed, List<string> checks, Exception? error = null)
     {
