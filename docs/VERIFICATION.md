@@ -4,7 +4,7 @@ Verification uses Node.js 24.19.0, TypeScript 5.9.3 and Chromium 153 on Linux/x6
 
 ## Automated coverage
 
-The Node suites cover model ownership and validation, live/snapshot text positions and structural symbols, editing, patch history, observer failures, tracked review, concurrent text operations, MVVM/React/bridge APIs, fields/notes/mail merge, format conversion, advanced DOCX stories/review/opaque parts, PDF generation, and independent PDF extraction.
+**172 Node tests passed** for the release implementation. The Node suites cover model ownership and validation, live/snapshot text positions and structural symbols, editing, patch history, observer failures, tracked review, concurrent text operations, MVVM/React/bridge APIs, fields/notes/mail merge, format conversion, advanced DOCX stories/review/opaque parts, PDF generation, and independent PDF extraction.
 
 The expanded browser suite currently has **57 grouped checks**. It covers native typing, selection/caret, clipboard sanitation, composition reconciliation, readonly guards, retained DOM identity, real measured page ranges/navigation, break/keep/widow rules, headers/footers/notes and overflow diagnostics. React Strict Mode, sample formatting/source/table/review controls, reusable toolbar dialogs, target changes, invalid page setup, stable TOC refresh, cached fields, two-peer offline edits/reconnection, independent PDF canvas/text search, pointer overlays/history, reconstructed native text editing, Unicode reflow export/download, themes and mobile overflow are included.
 
