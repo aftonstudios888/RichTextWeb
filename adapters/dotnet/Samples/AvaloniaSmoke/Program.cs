@@ -6,7 +6,20 @@ using RichTextWeb;
 internal static class Program
 {
     [STAThread]
-    public static int Main(string[] args) => AppBuilder.Configure<SmokeApplication>().UsePlatformDetect().LogToTrace().StartWithClassicDesktopLifetime(args);
+    public static int Main(string[] args)
+    {
+        try { return AppBuilder.Configure<SmokeApplication>().UsePlatformDetect().LogToTrace().StartWithClassicDesktopLifetime(args); }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine(error);
+            if (args.Contains("--smoke"))
+            {
+                string report = NativeSmoke.Argument(args, "--report") ?? Path.Combine(Environment.CurrentDirectory, "artifacts", "desktop", "avalonia");
+                NativeSmoke.ReportAsync(report, "avalonia-webview", false, new List<string>(), error).GetAwaiter().GetResult();
+            }
+            return 1;
+        }
+    }
 }
 public sealed class SmokeApplication : Application
 {
