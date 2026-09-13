@@ -231,6 +231,8 @@ On `main`, CI verifies Node 22 and 24, browser behavior, and installed package c
 
 The npm workflow downloads the immutable GitHub release tarball, verifies its checksum and installed consumers, publishes it with provenance using `NPM_TOKEN` or configured trusted publishing, and verifies the public registry's bytes. Existing versions with different bytes are rejected. `workflow_dispatch` can retry publication of an existing release. Increment the package version and lockfile together for a new release; never replace an existing release's assets.
 
+See [release verification and registry recovery](docs/RELEASING.md) for bounded publication retries and how to distinguish registry delays from staged packages awaiting approval.
+
 ## Documentation
 
 - [Document model and positions](docs/MODEL.md)
