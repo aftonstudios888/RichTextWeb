@@ -5,6 +5,9 @@
     <UseWinUI>true</UseWinUI>
     <!-- This host facade contains no XAML/PRI resources; the consuming app builds its own resources. -->
     <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <!-- GetPriOutputs runs in consuming applications, independently of NuGet Pack.
+         Do not advertise a nonexistent facade PRI to the app's resource merger. -->
+    <IncludeProjectPriFile>false</IncludeProjectPriFile>
     <GenerateLibraryLayout>false</GenerateLibraryLayout>
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
