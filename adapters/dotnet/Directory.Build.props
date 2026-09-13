@@ -19,7 +19,7 @@
     <WebView2Version>1.0.3537.50</WebView2Version>
     <WindowsAppSdkVersion>1.7.260224002</WindowsAppSdkVersion>
     <AvaloniaVersion>11.3.9</AvaloniaVersion>
-    <AvaloniaWebViewVersion>11.3.16</AvaloniaWebViewVersion>
+    <AvaloniaWebViewVersion>11.4.0</AvaloniaWebViewVersion>
   </PropertyGroup>
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)PACKAGE.md" Pack="true" PackagePath="README.md" />

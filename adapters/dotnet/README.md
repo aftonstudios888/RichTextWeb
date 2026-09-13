@@ -11,9 +11,9 @@ These source adapters embed the **same JavaScript RichTextWeb engine** in WPF, W
 | `Avalonia` | NativeWebView transport and attachment helper                                     | Avalonia NativeWebView component |
 | `web`      | `editor.html` with JS bridge initialization                                       | Built RichTextWeb `dist/` assets |
 
-Version 0.2 adds real projects with pinned dependencies in `Directory.Build.props`, an executable C# protocol suite, native package creation, a runnable WPF sample and Windows WebView2 smoke qualification. Reference the appropriate project directly or use the NuGet artifacts produced by the Desktop qualification workflow. Public nuget.org publication requires a separate publishing configuration and is not performed by this workflow.
+The native projects have pinned dependencies in `Directory.Build.props`, an executable C# protocol suite, native package creation, and runnable WPF, WinUI and Avalonia sample applications. Reference the appropriate project directly or use the NuGet artifacts produced by the Desktop qualification workflow. Public nuget.org publication requires a separate publishing configuration and is not performed by this workflow.
 
-The local .NET 8 SDK compiled the shared client, WPF host, WPF smoke application and Avalonia host. Seven C# protocol checks passed, including a live C# process exchanging requests and events with the actual JavaScript engine in Node. Windows UI execution is handled by the Windows workflow; the Linux workspace cannot execute the WPF application. A passing Windows job records the WebView2 version, assertions and a rendered screenshot. WinUI/Avalonia UI runtime, physical keyboard/IME, screen readers and physical GPU qualification remain separate application-level checks.
+Eight C# protocol checks cover the real JavaScript engine and the loopback asset server. Windows CI exercises WPF, WinUI and Avalonia application runtimes, with separate reports and rendered evidence for each. A passing build alone is not a runtime pass: check the matching workflow's JSON reports. Physical keyboard/IME, screen readers, additional operating systems and physical GPU qualification remain separate application-level checks.
 
 ## Prepare the assets
 
@@ -58,16 +58,16 @@ The Windows App SDK provides the WebView2 control; see the [official WinUI WebVi
 
 ## Avalonia
 
-Reference `Avalonia/RichTextWeb.Avalonia.csproj`. Its pinned official `Avalonia.Controls.WebView` package requires an Avalonia Accelerate license to run; this repository does not provide or bypass that license. Attach before navigating:
+Reference `Avalonia/RichTextWeb.Avalonia.csproj`. The pinned official `Avalonia.Controls.WebView` 11.4.0 package is MIT licensed and requires no Accelerate license key. Attach before navigating, using the reusable loopback asset server:
 
 ```csharp
-_client = AvaloniaRichTextHost.Connect(EditorWebView,
-    new Uri("http://127.0.0.1:51234/editor.html"));
+_assets = new LocalAssetServer(assetsDirectory); // Dispose with the window.
+_client = AvaloniaRichTextHost.Connect(EditorWebView, _assets.EditorUri);
 await _client.WaitUntilReadyAsync();
 await _client.InsertTextAsync("Hello from Avalonia");
 ```
 
-The host uses `NativeWebView.InvokeScript` for requests and `WebMessageReceived` / `invokeCSharpAction` for replies. The corresponding [official NativeWebView API](https://docs.avaloniaui.net/controls/web/nativewebview) describes the platform-specific runtime prerequisites. Linux/macOS/Windows support and component availability depend on the installed Avalonia WebView distribution. This repository does not supply those native runtimes or commercial component licenses.
+The host uses `NativeWebView.InvokeScript` for requests and `WebMessageReceived` / `invokeCSharpAction` for replies. The [official WebView documentation](https://docs.avaloniaui.net/docs/app-development/embedding-web-content) describes platform prerequisites. The MIT transition is recorded in the [11.4.0 package](https://www.nuget.org/packages/Avalonia.Controls.WebView/11.4.0). The application still needs the platform's browser runtime.
 
 ## Build, test and package
 
@@ -95,9 +95,11 @@ dotnet run --project adapters/dotnet/Samples/WpfSmoke/RichTextWeb.WpfSmoke.cspro
 dotnet run --project adapters/dotnet/Samples/WpfSmoke/RichTextWeb.WpfSmoke.csproj -c Release -- --smoke --assets artifacts/desktop/web --report artifacts/desktop/smoke
 ```
 
-The [Desktop qualification workflow](../../.github/workflows/desktop.yml) is reusable from the main release pipeline and can also be dispatched manually. Its Linux job runs the actual C# test program and builds/packages Avalonia. Its Windows job builds WPF and WinUI, installs WebView2 when necessary, runs the real WPF host and packages the runnable sample. Missing WebView2 or failed smoke assertions fail the job; they do not count as skipped passes. Artifacts contain `.nupkg`/`.snupkg` files, the sample, standalone web assets, the smoke JSON and the screenshot. The Windows smoke covers programmatic native messages and browser rendering, not physical input devices or a complete desktop accessibility audit.
+The [Desktop qualification workflow](../../../.github/workflows/desktop.yml) runs C# protocol tests and builds/packages Avalonia on Linux. Its Windows job runs all three native applications, verifies the saved reports and packages runnable samples. WPF and WinUI capture native browser PNGs; Avalonia captures a PDF produced by its native browser. Missing WebView2, failed assertions or absent reports fail the job. These checks exercise real native transports and rendering; physical input and desktop accessibility need separate testing.
 
-Pinned dependency versions are WebView2 1.0.3537.50, Windows App SDK 1.7.260224002, Avalonia 11.3.9 and Avalonia.Controls.WebView 11.3.16. Updating them should rerun desktop qualification.
+Run the Avalonia sample with `dotnet run --project adapters/dotnet/Samples/AvaloniaSmoke/RichTextWeb.AvaloniaSmoke.csproj -c Release -- --assets artifacts/desktop/web`. Add `--smoke --report artifacts/desktop/avalonia` for its checks. Build `Samples/WinUiSmoke/RichTextWeb.WinUiSmoke.csproj` from a Visual Studio Developer Shell using the same x64 MSBuild settings as the WinUI library, then run its executable with the same arguments. The WinUI sample deploys Windows App SDK components with the application and does not require MSIX registration.
+
+Pinned dependency versions are WebView2 1.0.3537.50, Windows App SDK 1.7.260224002, Avalonia 11.3.9 and Avalonia.Controls.WebView 11.4.0. Updating them should rerun desktop qualification.
 
 ## Fields, stories, notes, review and mail merge
 

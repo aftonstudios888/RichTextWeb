@@ -5,7 +5,7 @@ These .NET adapters host the RichTextWeb JavaScript rich text engine in desktop 
 - **RichTextWeb.Bridge**: shared .NET 8 protocol client, timeouts, cancellation and deterministic cleanup.
 - **RichTextWeb.Wpf**: WPF WebView2 host and navigation-restricted transport.
 - **RichTextWeb.WinUI**: WinUI 3 WebView2 host using Windows App SDK types.
-- **RichTextWeb.Avalonia**: Avalonia NativeWebView integration. The official Avalonia WebView dependency requires an Avalonia Accelerate runtime license.
+- **RichTextWeb.Avalonia**: Avalonia NativeWebView integration using the MIT-licensed official WebView 11.4 runtime, without an Accelerate license key.
 
 The engine remains JavaScript running inside the application's WebView. Packages do not implement a native C# text layout engine or complete Word/WPF API parity. The application must also deploy the standalone RichTextWeb browser bundle and the supplied editor host page.
 

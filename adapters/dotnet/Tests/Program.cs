@@ -16,6 +16,7 @@ internal static class Program
             await Run("disposal cancels pending requests", Disposal);
             await Run("ready and MVVM state notifications", Notifications);
             await Run("invalid and oversized envelopes", Validation);
+            await Run("loopback assets and path confinement", AssetServer);
             await Run("C# to real JavaScript engine integration", () => NodeEngine(args.FirstOrDefault()));
             Console.WriteLine($"PASS: {_passed} desktop bridge checks");
             return 0;
@@ -33,6 +34,30 @@ internal static class Program
     private static string RemoteError(string id, string code) => JsonSerializer.Serialize(new { channel = "richtextweb", version = 1, kind = "response", id, error = new { code, message = "test failure" } });
     private static string Event(string name, object payload) => JsonSerializer.Serialize(new { channel = "richtextweb", version = 1, kind = "event", @event = name, payload });
     private static string Id(string json) { using var doc = JsonDocument.Parse(json); return doc.RootElement.GetProperty("id").GetString()!; }
+
+    private static async Task AssetServer()
+    {
+        string temp = Path.Combine(Path.GetTempPath(), "richtextweb-assets-" + Guid.NewGuid());
+        string assets = Path.Combine(temp, "web"); Directory.CreateDirectory(assets);
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(assets, "editor.html"), "<h1>Editor</h1>");
+            await File.WriteAllTextAsync(Path.Combine(assets, "worker.mjs"), "export const worker = true;");
+            await File.WriteAllTextAsync(Path.Combine(temp, "private.txt"), "outside assets");
+            using var server = new LocalAssetServer(assets);
+            using var http = new HttpClient { BaseAddress = server.BaseUri, Timeout = TimeSpan.FromSeconds(5) };
+            Assert(server.BaseUri.Host == "127.0.0.1", "Server must bind loopback");
+            Assert((await http.GetStringAsync(server.EditorUri)).Contains("Editor"), "Editor delivery");
+            using var module = await http.GetAsync("worker.mjs");
+            Assert(module.Content.Headers.ContentType?.MediaType == "text/javascript", "ES module MIME");
+            using var missing = await http.GetAsync("missing.txt"); Assert((int)missing.StatusCode == 404, "Missing asset");
+            using var traversal = await http.GetAsync("..%2fprivate.txt"); Assert((int)traversal.StatusCode == 404, "Path escape");
+            using var mutation = await http.PostAsync("editor.html", new StringContent("replace")); Assert((int)mutation.StatusCode == 405, "Read-only server");
+            var concurrent = await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => http.GetStringAsync("editor.html")));
+            Assert(concurrent.All(value => value.Contains("Editor")), "Concurrent asset requests");
+        }
+        finally { Directory.Delete(temp, true); }
+    }
 
     private static async Task Correlation()
     {
