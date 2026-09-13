@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.2.0
+## 0.2.0
 
 - Live text positions with insertion gravity, snapshots, structural symbols and WPF-style context traversal.
 - Reversible patch history, compact retained text deltas and stable model object identity through undo/redo.
