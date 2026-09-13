@@ -92,7 +92,7 @@ jobs:
           enablement: true
       - name: Deploy sample
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
   release:
     needs: package
     if: github.ref == 'refs/heads/main'
