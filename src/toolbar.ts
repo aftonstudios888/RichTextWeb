@@ -1,0 +1,743 @@
+import { RichTextBox } from "./control.js";
+import {
+  DocumentFeatures,
+  createField,
+  type FieldType,
+} from "./document-features.js";
+import { FlowDocument, Paragraph, Run } from "./model.js";
+
+const HTMLElementBase = (globalThis.HTMLElement ??
+  class {}) as typeof HTMLElement;
+export type ToolbarMode = "home" | "insert" | "layout" | "review" | "all";
+interface Tool {
+  label: string;
+  command: string;
+  title?: string;
+}
+const home: Tool[] = [
+  { label: "↶", command: "Undo", title: "Undo" },
+  { label: "↷", command: "Redo", title: "Redo" },
+  { label: "B", command: "ToggleBold", title: "Bold" },
+  { label: "I", command: "ToggleItalic", title: "Italic" },
+  { label: "U", command: "ToggleUnderline", title: "Underline" },
+  { label: "S̶", command: "ToggleStrikethrough", title: "Strikethrough" },
+  { label: "x²", command: "ToggleSuperscript", title: "Superscript" },
+  { label: "x₂", command: "ToggleSubscript", title: "Subscript" },
+  { label: "Left", command: "AlignLeft" },
+  { label: "Center", command: "AlignCenter" },
+  { label: "Right", command: "AlignRight" },
+  { label: "Justify", command: "AlignJustify" },
+  { label: "• List", command: "ToggleBullets" },
+  { label: "1. List", command: "ToggleNumbering" },
+  { label: "Indent", command: "IncreaseIndentation" },
+  { label: "Outdent", command: "DecreaseIndentation" },
+  { label: "Clear", command: "ClearFormatting" },
+];
+const insert: Tool[] = [
+  { label: "Table", command: "Table" },
+  { label: "Image", command: "Image" },
+  { label: "Link", command: "Link" },
+  { label: "Unlink", command: "RemoveHyperlink" },
+  { label: "Row +", command: "InsertTableRow" },
+  { label: "Column +", command: "InsertTableColumn" },
+  { label: "Row −", command: "DeleteTableRow" },
+  { label: "Column −", command: "DeleteTableColumn" },
+  { label: "Field", command: "Field" },
+  { label: "Contents", command: "TableOfContents" },
+  { label: "Footnote", command: "Footnote" },
+  { label: "Endnote", command: "Endnote" },
+];
+const layout: Tool[] = [
+  { label: "Page setup", command: "PageSetup" },
+  { label: "Header", command: "Header" },
+  { label: "Footer", command: "Footer" },
+  { label: "Page number", command: "PageNumberFooter" },
+  { label: "Page break", command: "PageBreak" },
+  { label: "Keep together", command: "KeepTogether" },
+  { label: "Keep with next", command: "KeepWithNext" },
+  { label: "Update fields", command: "UpdateFields" },
+  { label: "Update contents", command: "UpdateTableOfContents" },
+  { label: "Mail merge", command: "MailMerge" },
+  { label: "Page preview", command: "PagePreview" },
+];
+const review: Tool[] = [
+  { label: "Track changes", command: "TrackChanges" },
+  { label: "Review changes", command: "ReviewChanges" },
+  { label: "Accept all", command: "AcceptAllRevisions" },
+  { label: "Reject all", command: "RejectAllRevisions" },
+  { label: "Comment", command: "Comment" },
+  { label: "Bookmark", command: "Bookmark" },
+  { label: "Find / replace", command: "FindReplace" },
+];
+const css = `:host{display:block;font:13px/1.4 var(--rt-ui-font,system-ui);color:var(--rt-toolbar-color,#22324b)}*{box-sizing:border-box}.tools{display:flex;gap:12px;flex-wrap:wrap;align-items:center;padding:9px 12px;background:var(--rt-toolbar-background,#fff);border:1px solid var(--rt-toolbar-border,#dbe1eb);border-radius:8px}.group{display:flex;gap:4px;align-items:center;flex-wrap:wrap}.group+.group{border-left:1px solid var(--rt-toolbar-border,#dbe1eb);padding-left:12px}button,input,select,textarea{font:inherit;color:inherit}button{min-height:32px;border:1px solid transparent;border-radius:5px;background:transparent;padding:5px 9px;cursor:pointer}button:hover{background:var(--rt-toolbar-hover,#edf3fc)}button[aria-pressed=true]{background:#dceaff;color:#084999;border-color:#accafa}button:disabled{opacity:.4;cursor:default}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #367adb;outline-offset:2px}select,input,textarea{border:1px solid var(--rt-toolbar-border,#ccd5e1);border-radius:4px;background:var(--rt-toolbar-background,#fff);padding:5px;max-width:100%}select{max-width:150px}input[type=color]{width:34px;height:32px;padding:3px}dialog{border:1px solid #cad3e0;border-radius:12px;padding:22px;width:min(520px,95vw);color:#22324b;box-shadow:0 24px 90px #10203c40}dialog::backdrop{background:#172d4e55}h2{margin:0 0 16px;font-size:19px}label{display:flex;flex-direction:column;gap:5px;margin:12px 0}textarea{min-height:100px;width:100%}.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.primary{background:#1254a3;color:white}.revision{border-top:1px solid #dce3ed;padding:10px 0}.revision p{white-space:pre-wrap;overflow-wrap:anywhere}.status{font-size:12px;max-width:360px}.muted{color:#63738a}@media(max-width:600px){.tools{gap:6px;padding:6px}.group+.group{padding-left:0;border-left:0}button{padding:5px 6px}}`;
+
+/** Reusable editor chrome. All mutations go through the attached RichTextBox engine. */
+export class RichTextToolbar extends HTMLElementBase {
+  static get observedAttributes() {
+    return ["for", "mode"];
+  }
+  private editor: RichTextBox | null = null;
+  private mode: ToolbarMode = "all";
+  private subscriptions: (() => void)[] = [];
+  private status = "";
+  constructor() {
+    super();
+    if (this.attachShadow) this.attachShadow({ mode: "open" });
+  }
+  connectedCallback() {
+    if (this.editor) this.Editor = this.editor;
+    if (this.Target) this.connectTarget();
+    this.render();
+  }
+  disconnectedCallback() {
+    this.detach();
+  }
+  attributeChangedCallback(
+    name: string,
+    _old: string | null,
+    value: string | null,
+  ) {
+    if (name === "mode") this.Mode = value as ToolbarMode;
+    else this.connectTarget();
+  }
+  get Editor() {
+    return this.editor;
+  }
+  set Editor(value: RichTextBox | null) {
+    if (value !== this.editor)
+      this.shadowRoot?.querySelector("dialog")?.close();
+    this.detach();
+    this.editor = value;
+    if (value)
+      for (const event of [
+        "documentchange",
+        "selectionchange",
+        "commandstatechange",
+      ]) {
+        const handler = () => this.Refresh();
+        value.addEventListener(event, handler);
+        this.subscriptions.push(() =>
+          value.removeEventListener(event, handler),
+        );
+      }
+    this.Refresh();
+  }
+  get Target() {
+    return this.getAttribute("for") ?? "";
+  }
+  set Target(value: string) {
+    this.setAttribute("for", value);
+  }
+  get Mode() {
+    return this.mode;
+  }
+  set Mode(value: ToolbarMode) {
+    this.mode = ["home", "insert", "layout", "review", "all"].includes(value)
+      ? value
+      : "all";
+    this.render();
+  }
+  private detach() {
+    this.subscriptions.splice(0).forEach((dispose) => dispose());
+  }
+  private connectTarget() {
+    const candidate = this.ownerDocument?.getElementById(this.Target);
+    this.Editor = candidate instanceof RichTextBox ? candidate : null;
+  }
+  Dispose() {
+    this.detach();
+    this.editor = null;
+    this.shadowRoot?.replaceChildren();
+  }
+  private render() {
+    if (!this.shadowRoot || !this.ownerDocument) return;
+    this.shadowRoot.innerHTML = `<style>${css}</style><div class="tools" part="toolbar" role="toolbar" aria-label="Rich text formatting"></div><dialog part="dialog"></dialog>`;
+    const tools = this.shadowRoot.querySelector(".tools")!;
+    const groups =
+      this.mode === "all"
+        ? [home, insert, layout, review]
+        : [{ home, insert, layout, review }[this.mode]];
+    for (const entries of groups) {
+      const group = this.ownerDocument.createElement("div");
+      group.className = "group";
+      if (entries === home) {
+        const font = this.select(
+          "Font family",
+          [
+            "Segoe UI",
+            "Arial",
+            "Georgia",
+            "Times New Roman",
+            "Verdana",
+            "Consolas",
+          ],
+          (value) => this.executeSafe("FontFamily", value),
+        );
+        font.id = "font-family";
+        group.append(font);
+        const size = this.select(
+          "Font size",
+          ["10", "12", "14", "16", "18", "20", "24", "32", "42", "56", "72"],
+          (value) => this.executeSafe("FontSize", Number(value)),
+        );
+        size.id = "font-size";
+        size.value = "16";
+        group.append(size);
+        const style = this.select(
+          "Paragraph style",
+          ["Normal", "Heading 1", "Heading 2", "Heading 3", "Heading 4"],
+          (value) =>
+            this.executeSafe(
+              "Heading",
+              value === "Normal" ? 0 : Number(value.slice(-1)),
+            ),
+        );
+        group.append(style);
+      }
+      for (const entry of entries) {
+        const button = this.ownerDocument.createElement("button");
+        button.type = "button";
+        button.textContent = entry.label;
+        button.dataset.command = entry.command;
+        button.title = entry.title ?? entry.label;
+        button.setAttribute("aria-label", entry.title ?? entry.label);
+        button.addEventListener("mousedown", (event) => event.preventDefault());
+        button.addEventListener("click", () => this.executeSafe(entry.command));
+        group.append(button);
+      }
+      if (entries === home)
+        for (const [id, label, command, value] of [
+          ["text-color", "Text color", "Foreground", "#1254a3"],
+          ["highlight-color", "Highlight color", "Background", "#fff0a6"],
+        ]) {
+          const input = this.ownerDocument.createElement("input");
+          input.type = "color";
+          input.id = id;
+          input.title = label;
+          input.setAttribute("aria-label", label);
+          input.value = value;
+          input.addEventListener("input", () =>
+            this.executeSafe(command, input.value),
+          );
+          group.append(input);
+        }
+      tools.append(group);
+    }
+    const status = this.ownerDocument.createElement("span");
+    status.className = "status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    tools.append(status);
+    this.Refresh();
+  }
+  private select(
+    label: string,
+    values: string[],
+    change: (value: string) => void,
+  ): HTMLSelectElement {
+    const select = this.ownerDocument.createElement("select");
+    select.setAttribute("aria-label", label);
+    select.title = label;
+    for (const value of values) {
+      const option = this.ownerDocument.createElement("option");
+      option.value = option.textContent = value;
+      select.append(option);
+    }
+    select.onchange = () => change(select.value);
+    return select;
+  }
+  Refresh() {
+    if (!this.shadowRoot) return;
+    const locked = !this.editor || this.editor.IsReadOnly,
+      engine = this.editor?.Engine;
+    this.shadowRoot
+      .querySelectorAll<
+        HTMLButtonElement | HTMLInputElement | HTMLSelectElement
+      >(".tools button,.tools input,.tools select")
+      .forEach((control) => {
+        control.disabled =
+          locked &&
+          !["PagePreview", "ReviewChanges"].includes(
+            control.dataset.command ?? "",
+          );
+        if (control.dataset.command === "Undo")
+          control.disabled = locked || !engine?.CanUndo;
+        if (control.dataset.command === "Redo")
+          control.disabled = locked || !engine?.CanRedo;
+      });
+    if (engine) {
+      for (const [command, property, value] of [
+        ["ToggleBold", "FontWeight", "Bold"],
+        ["ToggleItalic", "FontStyle", "Italic"],
+        ["ToggleUnderline", "TextDecorations", "Underline"],
+      ])
+        this.shadowRoot
+          .querySelector(`[data-command="${command}"]`)
+          ?.setAttribute(
+            "aria-pressed",
+            String(engine.Selection.GetPropertyValue(property) === value),
+          );
+      this.shadowRoot
+        .querySelector('[data-command="TrackChanges"]')
+        ?.setAttribute("aria-pressed", String(engine.TrackChanges));
+    }
+    const status = this.shadowRoot.querySelector(".status");
+    if (status) status.textContent = this.status;
+  }
+  private executeSafe(command: string, parameter?: unknown) {
+    try {
+      this.Execute(command, parameter);
+    } catch (error) {
+      this.status = error instanceof Error ? error.message : String(error);
+      this.Refresh();
+      this.dispatchEvent(
+        new CustomEvent("commanderror", {
+          detail: { command, error },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    }
+  }
+  /** Commands can also be driven by framework bindings and application menus. */
+  Execute(command: string, parameter?: unknown): unknown {
+    const editor = this.editor;
+    if (!editor) return false;
+    if (
+      editor.IsReadOnly &&
+      !["PagePreview", "ReviewChanges"].includes(command)
+    )
+      return false;
+    const engine = editor.Engine,
+      features = new DocumentFeatures(engine);
+    const mutate = (action: () => unknown) => {
+      if (editor.IsReadOnly) return false;
+      const result = action();
+      editor.Focus();
+      this.Refresh();
+      return result;
+    };
+    switch (command) {
+      case "Table":
+        this.prompt(
+          "Insert table",
+          [
+            { name: "rows", label: "Rows", value: "3", type: "number" },
+            { name: "columns", label: "Columns", value: "3", type: "number" },
+          ],
+          (data) =>
+            mutate(() =>
+              engine.InsertTable(Number(data.rows), Number(data.columns)),
+            ),
+        );
+        break;
+      case "Link":
+        this.prompt(
+          "Insert hyperlink",
+          [
+            { name: "url", label: "URL", value: "https://" },
+            {
+              name: "text",
+              label: "Display text",
+              value: engine.Selection.Text,
+            },
+          ],
+          (data) =>
+            mutate(() =>
+              engine.Execute("InsertHyperlink", {
+                uri: data.url,
+                text: data.text,
+              }),
+            ),
+        );
+        break;
+      case "Image":
+        this.prompt(
+          "Insert image",
+          [
+            { name: "url", label: "Image URL", value: "https://" },
+            { name: "alt", label: "Alternative text", value: "" },
+            {
+              name: "width",
+              label: "Width (px)",
+              value: "320",
+              type: "number",
+            },
+          ],
+          (data) =>
+            mutate(() =>
+              engine.Execute("InsertImage", {
+                source: data.url,
+                alt: data.alt,
+                width: Number(data.width),
+              }),
+            ),
+        );
+        break;
+      case "Field":
+        this.prompt(
+          "Insert field",
+          [
+            {
+              name: "type",
+              label: "Field type",
+              value: "PAGE",
+              options: [
+                "PAGE",
+                "NUMPAGES",
+                "DATE",
+                "TIME",
+                "MERGEFIELD",
+                "REF",
+                "PAGEREF",
+                "SEQ",
+                "TITLE",
+                "AUTHOR",
+                "FILENAME",
+              ],
+            },
+            {
+              name: "argument",
+              label: "Bookmark, merge column, or sequence name",
+              value: "",
+            },
+          ],
+          (data) =>
+            mutate(() => {
+              features.InsertField(data.type as FieldType, data.argument);
+              features.UpdateFields();
+            }),
+        );
+        break;
+      case "TableOfContents":
+        mutate(() => features.InsertTableOfContents());
+        break;
+      case "Footnote":
+      case "Endnote":
+        this.prompt(
+          `Insert ${command.toLowerCase()}`,
+          [{ name: "text", label: "Note text", value: "", type: "textarea" }],
+          (data) => mutate(() => features.InsertNote(command, data.text)),
+        );
+        break;
+      case "Header":
+      case "Footer":
+        this.prompt(
+          `Edit ${command.toLowerCase()}`,
+          [
+            {
+              name: "text",
+              label: `${command} text`,
+              value: storyText(
+                editor,
+                command === "Header" ? "Headers" : "Footers",
+              ),
+              type: "textarea",
+            },
+          ],
+          (data) =>
+            mutate(() =>
+              features.SetStory(command === "Header" ? "Headers" : "Footers", [
+                new Paragraph(data.text).ToJSON(),
+              ]),
+            ),
+        );
+        break;
+      case "PageNumberFooter":
+        mutate(() => {
+          const p = new Paragraph(new Run("Page "));
+          p.Inlines.Add(createField("PAGE"));
+          p.Inlines.Add(new Run(" of "));
+          p.Inlines.Add(createField("NUMPAGES"));
+          p.TextAlignment = "Center";
+          features.SetStory("Footers", [p.ToJSON()]);
+        });
+        break;
+      case "PageSetup":
+        this.prompt(
+          "Page setup",
+          [
+            {
+              name: "width",
+              label: "Page width (px)",
+              value: String(editor.Document.PageWidth),
+              type: "number",
+            },
+            {
+              name: "height",
+              label: "Page height (px)",
+              value: String(editor.Document.PageHeight),
+              type: "number",
+            },
+            {
+              name: "padding",
+              label: "Page padding (px)",
+              value: "72",
+              type: "number",
+            },
+            {
+              name: "columns",
+              label: "Columns",
+              value: String(editor.Document.GetValue("ColumnCount") ?? 1),
+              type: "number",
+            },
+          ],
+          (data) =>
+            mutate(() => {
+              const root = editor.Document.ToJSON();
+              for (const [name, key] of [
+                ["width", "PageWidth"],
+                ["height", "PageHeight"],
+                ["padding", "PagePadding"],
+                ["columns", "ColumnCount"],
+              ]) {
+                const value = Number(data[name]);
+                if (
+                  !Number.isFinite(value) ||
+                  value < 0 ||
+                  (key !== "PagePadding" && value === 0) ||
+                  (key === "ColumnCount" && !Number.isInteger(value))
+                )
+                  throw new RangeError(
+                    "Page values must be valid positive dimensions and an integer column count.",
+                  );
+                root.props[key] = value;
+              }
+              engine.ReplaceDocument(FlowDocument.FromJSON(root));
+            }),
+        );
+        break;
+      case "PageBreak":
+        mutate(() => engine.SetParagraphProperty("BreakPageBefore", true));
+        break;
+      case "KeepTogether":
+      case "KeepWithNext":
+        mutate(() => engine.SetParagraphProperty(command, true));
+        break;
+      case "UpdateFields":
+        mutate(() => {
+          const result = features.UpdateFields();
+          this.status = `${result.Updated} fields updated${result.Unresolved.length ? `; ${result.Unresolved.length} need page or merge data` : ""}`;
+        });
+        break;
+      case "UpdateTableOfContents":
+        mutate(() => features.UpdateTableOfContents());
+        break;
+      case "MailMerge":
+        this.prompt(
+          "Mail merge",
+          [
+            {
+              name: "records",
+              label: "JSON array of records",
+              value: '[{"Name":"Ada"},{"Name":"Grace"}]',
+              type: "textarea",
+            },
+          ],
+          (data) =>
+            mutate(() => {
+              const records = JSON.parse(data.records);
+              if (
+                !Array.isArray(records) ||
+                records.some(
+                  (row) =>
+                    !row || typeof row !== "object" || Array.isArray(row),
+                )
+              )
+                throw new TypeError("Supply an array of record objects.");
+              const documents = features.MailMerge(records);
+              this.dispatchEvent(
+                new CustomEvent("documentsgenerated", {
+                  detail: { documents },
+                  bubbles: true,
+                  composed: true,
+                }),
+              );
+              this.status = `${documents.length} merged documents generated`;
+            }),
+        );
+        break;
+      case "TrackChanges":
+        mutate(() => {
+          engine.TrackChanges = !engine.TrackChanges;
+        });
+        break;
+      case "AcceptAllRevisions":
+        mutate(() => engine.AcceptAllRevisions());
+        break;
+      case "RejectAllRevisions":
+        mutate(() => engine.RejectAllRevisions());
+        break;
+      case "ReviewChanges":
+        this.reviewChanges();
+        break;
+      case "Comment":
+        this.prompt(
+          "Add comment",
+          [{ name: "text", label: "Comment", value: "", type: "textarea" }],
+          (data) =>
+            mutate(() => engine.AddComment(data.text, engine.CurrentAuthor)),
+        );
+        break;
+      case "Bookmark":
+        this.prompt(
+          "Add bookmark",
+          [{ name: "name", label: "Bookmark name", value: "" }],
+          (data) => mutate(() => engine.AddBookmark(data.name)),
+        );
+        break;
+      case "FindReplace":
+        this.prompt(
+          "Find and replace",
+          [
+            { name: "find", label: "Find", value: engine.Selection.Text },
+            { name: "replace", label: "Replace with", value: "" },
+          ],
+          (data) => mutate(() => engine.ReplaceAll(data.find, data.replace)),
+        );
+        break;
+      case "PagePreview":
+        this.dispatchEvent(
+          new CustomEvent("previewrequest", {
+            detail: { document: editor.Document },
+            bubbles: true,
+            composed: true,
+          }),
+        );
+        break;
+      default:
+        return mutate(() => editor.Execute(command, parameter));
+    }
+    this.dispatchEvent(
+      new CustomEvent("commandexecuted", {
+        detail: { command },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    return true;
+  }
+  private prompt(
+    title: string,
+    fields: {
+      name: string;
+      label: string;
+      value: string;
+      type?: string;
+      options?: string[];
+    }[],
+    submit: (data: Record<string, string>) => unknown,
+  ) {
+    const dialog = this.shadowRoot!.querySelector("dialog")!;
+    dialog.replaceChildren();
+    const form = this.ownerDocument.createElement("form");
+    form.method = "dialog";
+    const heading = this.ownerDocument.createElement("h2");
+    heading.textContent = title;
+    form.append(heading);
+    for (const field of fields) {
+      const label = this.ownerDocument.createElement("label");
+      label.textContent = field.label;
+      let input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+      if (field.options)
+        input = this.select(field.label, field.options, () => {});
+      else
+        input = this.ownerDocument.createElement(
+          field.type === "textarea" ? "textarea" : "input",
+        );
+      if (input instanceof HTMLInputElement) input.type = field.type ?? "text";
+      input.name = field.name;
+      input.value = field.value;
+      label.append(input);
+      form.append(label);
+    }
+    const actions = this.ownerDocument.createElement("div");
+    actions.className = "actions";
+    const cancel = this.ownerDocument.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.onclick = () => dialog.close();
+    const apply = this.ownerDocument.createElement("button");
+    apply.textContent = "Apply";
+    apply.className = "primary";
+    actions.append(cancel, apply);
+    form.append(actions);
+    dialog.append(form);
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      if (this.editor?.IsReadOnly) {
+        dialog.close();
+        return;
+      }
+      try {
+        submit(
+          Object.fromEntries(new FormData(form)) as Record<string, string>,
+        );
+        dialog.close();
+      } catch (error) {
+        this.status = error instanceof Error ? error.message : String(error);
+        this.Refresh();
+      }
+    };
+    dialog.showModal();
+  }
+  private reviewChanges() {
+    const dialog = this.shadowRoot!.querySelector("dialog")!;
+    dialog.replaceChildren();
+    const h = this.ownerDocument.createElement("h2");
+    h.textContent = "Tracked changes";
+    dialog.append(h);
+    const revisions = this.editor!.Engine.Revisions;
+    if (!revisions.length) {
+      const p = this.ownerDocument.createElement("p");
+      p.textContent = "No pending changes.";
+      dialog.append(p);
+    }
+    for (const revision of revisions) {
+      const row = this.ownerDocument.createElement("div");
+      row.className = "revision";
+      const p = this.ownerDocument.createElement("p");
+      p.textContent = `${revision.Kind} · ${revision.Data.Author ?? "Author"}\n${revision.Data.Text ?? this.editor!.Document.Text.slice(revision.Start, revision.End)}`;
+      row.append(p);
+      for (const action of ["Accept", "Reject"]) {
+        const b = this.ownerDocument.createElement("button");
+        b.textContent = action;
+        b.disabled = this.editor!.IsReadOnly;
+        b.onclick = () => {
+          if (this.editor!.IsReadOnly) return;
+          try {
+            action === "Accept"
+              ? this.editor!.Engine.AcceptRevision(revision.Id)
+              : this.editor!.Engine.RejectRevision(revision.Id);
+            dialog.close();
+            this.reviewChanges();
+          } catch (error) {
+            this.status = String(error);
+            this.Refresh();
+          }
+        };
+        row.append(b);
+      }
+      dialog.append(row);
+    }
+    const close = this.ownerDocument.createElement("button");
+    close.textContent = "Close";
+    close.onclick = () => dialog.close();
+    dialog.append(close);
+    dialog.showModal();
+  }
+}
+function storyText(editor: RichTextBox, key: string): string {
+  const blocks = editor.Document.GetValue(key) ?? [];
+  const text = (node: any): string =>
+    node.type === "Run"
+      ? (node.text ?? "")
+      : (node.children ?? []).map(text).join("");
+  return blocks.map(text).join("\n");
+}
+export function registerRichTextToolbar(
+  registry: CustomElementRegistry | undefined = globalThis.customElements,
+): void {
+  if (registry && !registry.get("rich-text-toolbar"))
+    registry.define("rich-text-toolbar", RichTextToolbar);
+}

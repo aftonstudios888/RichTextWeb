@@ -1,7 +1,9 @@
 import * as RT from "../src/index.ts";
 import { openPDFTools } from "./pdf-tools.js";
+import { openCollaborationDemo } from "./collaboration-demo.js";
 const $ = (id) => document.getElementById(id);
 RT.registerRichTextWeb?.();
+RT.registerRichTextToolbar?.();
 const editor = $("editor");
 let tab = "home",
   panel = "document",
@@ -302,60 +304,29 @@ function group(name, content) {
 const row = (html) => `<div class="ribbon-row">${html}</div>`,
   stack = (html) => `<div class="ribbon-stack">${html}</div>`;
 function renderRibbon() {
+  if (tab === "home" || tab === "advanced") {
+    const toolbar = document.createElement("rich-text-toolbar");
+    toolbar.Editor = editor;
+    toolbar.Mode = tab === "home" ? "home" : "all";
+    toolbar.addEventListener("previewrequest", openPagePreview);
+    toolbar.addEventListener("documentsgenerated", (event) =>
+      event.detail.documents.forEach((doc, index) =>
+        download(
+          JSON.stringify(doc.ToJSON(), null, 2),
+          `merged-${index + 1}.json`,
+          "application/json",
+        ),
+      ),
+    );
+    toolbar.addEventListener("commanderror", (event) =>
+      toast(event.detail.error.message),
+    );
+    $("ribbon").replaceChildren(toolbar);
+    update();
+    return;
+  }
   let html = "";
-  if (tab === "home")
-    html =
-      group(
-        "History",
-        stack(
-          row(
-            tool("↶", "undo", "", "", "Undo (Ctrl+Z)") +
-              tool("↷", "redo", "", "", "Redo (Ctrl+Y)"),
-          ) + row(tool("Select all", "select-all")),
-        ),
-      ) +
-      group(
-        "Font",
-        stack(
-          row(
-            '<select id="font-family" aria-label="Font family"><option>Segoe UI</option><option>Arial</option><option>Georgia</option><option>Times New Roman</option><option>Verdana</option><option>Consolas</option></select><select id="font-size" aria-label="Font size"><option>12</option><option>14</option><option selected>16</option><option>18</option><option>20</option><option>24</option><option>32</option><option>42</option><option>56</option></select>',
-          ) +
-            row(
-              tool("<b>B</b>", "bold", "", "", "Bold (Ctrl+B)") +
-                tool("<i>I</i>", "italic", "", "", "Italic (Ctrl+I)") +
-                tool("<u>U</u>", "underline", "", "", "Underline (Ctrl+U)") +
-                tool("<s>S</s>", "strike", "", "", "Strikethrough") +
-                tool("x²", "superscript", "", "", "Superscript") +
-                '<input type="color" id="text-color" value="#1254a3" title="Text color" aria-label="Text color"><input type="color" id="highlight-color" value="#fff0a6" title="Highlight" aria-label="Highlight color">',
-            ),
-        ),
-      ) +
-      group(
-        "Paragraph",
-        stack(
-          row(
-            tool("≡", "align-left", "", "", "Align left") +
-              tool("☰", "align-center", "", "", "Align center") +
-              tool("≡", "align-right", "", "", "Align right") +
-              tool("▤", "align-justify", "", "", "Justify"),
-          ) +
-            row(
-              tool("• List", "bullets") +
-                tool("1. List", "numbering") +
-                tool("↕", "spacing", "", "", "Line spacing"),
-            ),
-        ),
-      ) +
-      group(
-        "Styles",
-        `<button class="style-card" data-command="normal"><strong>AaBbCc</strong><span>Normal</span></button><button class="style-card heading" data-command="heading1"><strong>Heading 1</strong><span>Title</span></button><button class="style-card heading" data-command="heading2"><strong>Heading 2</strong><span>Section</span></button>`,
-      ) +
-      group(
-        "Editing",
-        tool("Find", "find", "⌕", true) +
-          tool("Clear", "clear-format", "A̸", true),
-      );
-  else if (tab === "file")
+  if (tab === "file")
     html =
       group(
         "Document",
@@ -480,7 +451,8 @@ function renderRibbon() {
         tool("API example", "api-example", "</>", true) +
           tool("MVVM", "mvvm-example", "⇄", true) +
           tool("React", "react-example", "⚛", true) +
-          tool("WebView bridge", "bridge-example", "▣", true),
+          tool("WebView bridge", "bridge-example", "▣", true) +
+          tool("Coauthor demo", "collaboration-demo", "⇄", true),
       ) +
       group("Performance", tool("Large document", "large-document", "▥", true));
   $("ribbon").innerHTML = html;
@@ -648,6 +620,7 @@ function attachReviewHandlers() {
     );
 }
 function run(command) {
+  if (command === "collaboration-demo") return openCollaborationDemo(RT);
   safe(() => {
     const e = editor.Engine;
     if (mutationCommands.has(command) && !canEdit()) return;
@@ -1353,3 +1326,26 @@ renderRibbon();
 renderPanel();
 update();
 window.richTextStudio = { editor, RT, loadTemplate, download, run };
+
+async function openPagePreview() {
+  const dialog = document.createElement("dialog");
+  dialog.className = "page-preview-dialog";
+  const header = document.createElement("div");
+  header.className = "dialog-title";
+  const heading = document.createElement("h2");
+  heading.textContent = "Paginated document preview";
+  const close = document.createElement("button");
+  close.textContent = "Close";
+  close.onclick = () => dialog.close();
+  header.append(heading, close);
+  const viewer = document.createElement("flow-document-page-viewer");
+  viewer.Document = editor.Document;
+  dialog.append(header, viewer);
+  document.body.append(dialog);
+  dialog.showModal();
+  dialog.onclose = () => {
+    viewer.Dispose();
+    dialog.remove();
+  };
+  await viewer.Repaginate();
+}

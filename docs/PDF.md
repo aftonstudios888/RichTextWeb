@@ -1,4 +1,4 @@
-# PDF export and page editing
+# PDF export, extraction, reflow, and editing
 
 RichTextWeb exports flow documents as real PDF text, vector rules, and embedded images using `pdf-lib`. The PDF module is available from `@wieslawsoltes/richtextweb/formats`. It runs in browsers and Node without a DOM or a print dialog.
 
@@ -28,7 +28,148 @@ Standard PDF fonts support WinAnsi, including many Western European characters. 
 
 Unsupported characters throw a descriptive error by default, including characters absent from a supplied custom font. This prevents silently corrupting multilingual documents. An application can explicitly opt into `unsupportedGlyphs: 'replace'` and receive per-character warnings through `onWarning`; unsupported characters then become question marks. Automatic font fallback, qualified complex-script/bidirectional typography, multicolumn layout, full justification, floating objects, footnotes, fields, comments, bookmarks, active hyperlinks, repeated table headers, tagged PDF accessibility, PDF/A, and Word-identical pagination are outside this exporter. Use a qualified external typesetting service when those requirements apply.
 
-The output retains selectable text for supported characters. It is not a PDF viewer or a reverse PDF-to-flow importer. Tests verify PDF structure, text drawing operators, pagination, images, table continuation, glyph policy, and page transformations; they do not certify document standards or every reader's rasterization.
+The output retains selectable text for supported characters. Tests verify PDF structure, text drawing operators, pagination, images, table continuation, glyph policy, and page transformations; they do not certify document standards or every reader's rasterization. PDF viewing and import are provided by the separate optional entrypoint described below.
+
+## Import an existing PDF into editable flow text
+
+Version 0.2 adds genuine PDF text extraction through Mozilla PDF.js. Use the
+`@wieslawsoltes/richtextweb/pdf` entrypoint for PDF import and the reusable viewer.
+This keeps PDF.js and its worker out of applications that only import the core
+engine or the existing export APIs.
+
+```ts
+import { extractPDF, fromPDF } from "@wieslawsoltes/richtextweb/pdf";
+import { RichTextEngine } from "@wieslawsoltes/richtextweb/core";
+
+const result = await extractPDF(existingBytes);
+console.log(result.pages, result.warnings);
+const engine = new RichTextEngine(result.document);
+engine.Select(0, 0);
+engine.InsertText("Edited document: ");
+
+// Convenience API when only the flow document is needed.
+const document = await fromPDF(existingBytes, {
+  readingOrder: "layout",
+  preservePageBreaks: true,
+});
+```
+
+The importer extracts Unicode text through the PDF's character mappings,
+recovers font families, font size, bold and italic metadata, groups positioned
+text into lines, and reconstructs paragraphs. Spatial reading order uses
+whitespace segmentation to handle common columns. `readingOrder: "content"`
+instead orders reconstructed lines and their runs by source text operators.
+Both modes are heuristics: a PDF typically stores drawing instructions rather
+than original word-processing paragraphs, table cells, or semantic reading order.
+Review the resulting flow, especially for tables, sidebars, overlapping text,
+rotation, and bidirectional scripts.
+
+Each source page becomes a flow `Section`. The original dimensions, rotation,
+and crop box remain in `FlowDocument`'s `PDFSourcePages` property. Paragraphs and
+runs retain `PDFGeometry`, including page index, displayed bounding box in PDF
+points, and each run's original PDF transform. These properties preserve source
+geometry for inspection and correspondence; the editable flow lays out its text
+anew. The first page's displayed size becomes the flow page size. Mixed source
+page sizes remain in metadata and are not silently presented as identical reflow
+pagination.
+
+`extractPDF` returns `{ document, pages, warnings, metadata }`. Each page includes
+positioned lines and runs, original and displayed page size, rotation, crop box,
+and extracted plain text. `fromPDF` returns just the document. Import options
+include `password`, `readingOrder`, `preservePageBreaks`, `maxPages` (default 500),
+`maxTextItems` (default 200,000), `signal`, and `onWarning`. Exceeding a configured
+limit rejects instead of returning a silently truncated document. Caller-owned
+byte arrays are copied before passing to the worker, so their buffers remain
+usable after import.
+
+**Reflow creates a reconstructed document.** Editing it and exporting creates a
+new PDF; it does not rewrite individual text operators in the source PDF.
+Images, vector art, forms, annotations, tagged-PDF semantics, and original page
+composition remain in the source. Image-only/scanned pages receive an explicit
+warning and an empty flow section; OCR is not supplied. Existing embedded fonts
+are used to decode source text, but are not automatically transplanted into the
+new PDF. Supply appropriate licensed `fontBytes` to `toPDF` when the reflow uses
+characters outside the standard PDF font repertoire.
+
+Independent-import tests use a PDF generated with ReportLab rather than this
+package's exporter. That fixture includes out-of-order drawing instructions,
+two columns, styled and accented text, a rotated Unicode page, and a page
+containing only graphics. Tests edit the reconstructed text through the shared
+engine, export it with an embedded font, and parse the resulting PDF again.
+
+## Reusable PDF editor control
+
+`PDFEditorControl` is the framework-independent `<rich-pdf-editor>` web component.
+It renders actual PDF pages onto a canvas and adds a selectable text layer.
+Its toolbar provides file opening, PDF download, page navigation, zoom, search,
+text/image/rectangle/highlight/cover overlays, page rotation, page reordering,
+deletion, blank-page insertion, import of pages from other PDFs, and undo/redo.
+Pointer tools convert screen positions through the current page viewport, so
+zoom and page rotation use the source PDF coordinate system.
+
+The **Edit as flow** action opens a real `RichTextBox` inside the control, backed
+by the shared document engine. Text can be edited normally and downloaded as a
+new reflowed PDF. The original PDF view remains available, and its page/overlay
+edits are separate from edits to the reconstructed flow.
+
+```ts
+import { configurePDF, PDFEditorControl } from "@wieslawsoltes/richtextweb/pdf";
+
+configurePDF({
+  workerSrc: "/pdf-assets/pdf.worker.mjs",
+  cMapUrl: "/pdf-assets/cmaps/",
+  standardFontDataUrl: "/pdf-assets/standard_fonts/",
+  wasmUrl: "/pdf-assets/wasm/",
+  iccUrl: "/pdf-assets/iccs/",
+});
+
+const editor = new PDFEditorControl();
+document.querySelector("#host").append(editor);
+await editor.Load(existingBytes);
+editor.addEventListener("flowdocumentimport", (event) => {
+  console.log(event.detail.document, event.detail.warnings);
+});
+editor.ReflowExportOptions = { fontBytes: licensedFontBytes };
+```
+
+Copy `legacy/build/pdf.worker.mjs` and the `cmaps`, `standard_fonts`, `wasm`, and
+`iccs` directories from the installed `pdfjs-dist` package. Serve JavaScript
+modules using a JavaScript MIME type and `.wasm` as `application/wasm`. Worker
+and support assets must match the installed PDF.js version. `configurePDFWorker`
+is a convenience API when only the worker URL needs configuration. The shipped
+sample copies these assets and loads `richtextweb.pdf.js` only when the PDF
+workspace is opened. No hosted third-party viewer is required. The optional
+entrypoint supports ESM; use `await import("@wieslawsoltes/richtextweb/pdf")`
+from CommonJS applications because PDF.js itself uses ESM initialization.
+
+| Control API                                                           | Behavior                                                                                        |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `Load(bytes, importOptions?)`                                         | Opens an unencrypted PDF for viewing and editing                                                |
+| `Engine`                                                              | Exposes the underlying `PDFEditor` for advanced consumers                                       |
+| `PageCount`, `PageIndex`, `Zoom`, `FitWidth()`                        | Navigates and sizes the view                                                                    |
+| `Tool`, `IsReadOnly`                                                  | Sets the pointer tool and UI editing state                                                      |
+| `Save()`                                                              | Returns the source PDF including page and overlay edits                                         |
+| `AddText`, `AddImage`, `Highlight`, `DrawRectangle`, `CoverRegion`    | Adds history-aware overlays using the same arguments as `PDFEditor`                             |
+| `RotatePage`, `ReorderPages`, `DeletePages`, `AddPage`, `InsertPages` | Organizes pages with undo support                                                               |
+| `CanUndo`, `CanRedo`, `Undo()`, `Redo()`                              | Manages up to 20 snapshots of PDF edits                                                         |
+| `Find(query, {caseSensitive?}?)`                                      | Searches reconstructed text lines across pages; boxes highlight the containing line             |
+| `ImportToFlowDocument(options?)`                                      | Reconstructs text and opens the internal rich text editor                                       |
+| `FlowDocument`, `ViewMode`                                            | Accesses the derived document and switches between `pdf` and `flow` views                       |
+| `ExportReflow(options?)`                                              | Creates a new PDF from the edited flow                                                          |
+| `ReflowExportOptions`                                                 | Default export/font options used by `ExportReflow` and its download button                      |
+| `Refresh()`                                                           | Renders externally changed `Engine` state; direct engine mutations do not enter control history |
+| `Dispose()`                                                           | Releases the PDF worker/document and editing resources                                          |
+
+The control emits `pdfload`, `pdfchange`, `pagechange`, `pagerender`, `pdferror`,
+`flowdocumentimport`, and `flowdocumentchange` events. Registration is idempotent
+through `registerPDFEditor`; the optional entrypoint registers the element when
+a browser registry is available. Imports are safe during server rendering.
+The `theme="dark"` attribute changes the editing workspace while preserving the
+PDF page's own colors. Set the host's height in CSS for a resizable embedded view.
+
+Browser tests exercise file opening, real canvas ink and text selection,
+search, pointer overlays, undo/redo, page operations, separate core/PDF bundles,
+native flow text input, and downloading/reparsing a Unicode reflowed PDF.
 
 ## Editing an existing PDF
 
@@ -65,4 +206,4 @@ const modifiedBytes = await editor.Save();
 | `InsertPages(bytes, indices?, insertionIndex?)` | Copies selected pages from another PDF; defaults to appending all source pages         |
 | `Save()`                                        | Serializes the modified PDF to `Uint8Array`                                            |
 
-**CoverRegion is not redaction.** The original content can still be extracted, searched, copied, or recovered. Do not use it to remove secrets. True content-removing redaction is deliberately absent. Existing PDF text is not converted into editable paragraphs; editing it does not support reflow, font substitution, or arbitrary content-stream rewriting. Digital signatures are not preserved as valid signatures after modification. Interactive form manipulation and PDF-native annotations are not exposed by this wrapper; highlights are drawing overlays.
+**CoverRegion is not redaction.** The original content can still be extracted, searched, copied, or recovered. Do not use it to remove secrets. True content-removing redaction is deliberately absent. Source-PDF text operators are not rewritten by the overlay editor; the optional importer provides a separate reconstructed flow for text editing and reflow. Digital signatures are not preserved as valid signatures after modification. Interactive form manipulation and PDF-native annotations are not exposed by this wrapper; highlights are drawing overlays.

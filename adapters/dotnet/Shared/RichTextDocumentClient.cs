@@ -7,12 +7,18 @@ namespace RichTextWeb;
 /// <summary>A WebView transport; create, call and dispose the host adapter on its UI thread.</summary>
 public interface IRichTextTransport : IDisposable
 {
+    /// <summary>Raises a complete JSON message received from the engine.</summary>
     event Action<string>? MessageReceived;
+    /// <summary>Sends one validated protocol envelope to the hosted engine.</summary>
     Task SendAsync(string json, CancellationToken cancellationToken = default);
 }
 
+/// <summary>A rejected bridge request with its machine-readable protocol error code.</summary>
+/// <param name="code">The remote protocol error code.</param>
+/// <param name="message">The error description.</param>
 public sealed class RichTextBridgeException(string code, string message) : Exception(message)
 {
+    /// <summary>Gets the error code, such as read_only or revision_conflict.</summary>
     public string Code { get; } = code;
 }
 
@@ -25,25 +31,37 @@ public sealed class RichTextDocumentClient : INotifyPropertyChanged, IDisposable
     private readonly SynchronizationContext? _context = SynchronizationContext.Current;
     private long _sequence;
     private bool _disposed;
+    /// <summary>Gets or sets the maximum time to wait for a response or ready handshake.</summary>
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(30);
+    /// <summary>Gets or sets the largest accepted incoming JSON message in UTF-16 code units.</summary>
     public int MaximumIncomingMessageLength { get; set; } = 8 * 1024 * 1024;
+    /// <summary>Gets the most recently notified document revision.</summary>
     public long Revision { get; private set; }
+    /// <summary>Gets whether the engine reports undo history.</summary>
     public bool CanUndo { get; private set; }
+    /// <summary>Gets whether the engine reports redo history.</summary>
     public bool CanRedo { get; private set; }
+    /// <summary>Gets the latest snapshot when the host enables includeDocumentInEvents.</summary>
     public JsonElement? Document { get; private set; }
+    /// <summary>Raises native MVVM notifications on the captured synchronization context.</summary>
     public event PropertyChangedEventHandler? PropertyChanged;
+    /// <summary>Raises engine events with detached JSON payloads.</summary>
     public event Action<string, JsonElement>? EventReceived;
+    /// <summary>Reports malformed or oversized incoming messages.</summary>
     public event Action<Exception>? ProtocolError;
 
+    /// <summary>Creates a client that owns the supplied transport.</summary>
     public RichTextDocumentClient(IRichTextTransport transport)
     {
         _transport = transport;
         _transport.MessageReceived += Receive;
     }
 
+    /// <summary>Waits for the ready handshake from the loaded editor page.</summary>
     public Task WaitUntilReadyAsync(CancellationToken cancellationToken = default) =>
         _ready.Task.WaitAsync(RequestTimeout, cancellationToken);
 
+    /// <summary>Invokes a supported bridge method and returns its correlated JSON result.</summary>
     public async Task<JsonElement> InvokeAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -60,15 +78,48 @@ public sealed class RichTextDocumentClient : INotifyPropertyChanged, IDisposable
         finally { _pending.TryRemove(id, out _); }
     }
 
+    /// <summary>Fetches the full canonical document snapshot.</summary>
     public Task<JsonElement> GetDocumentAsync(CancellationToken token = default) => InvokeAsync("getDocument", cancellationToken: token);
+    /// <summary>Replaces the document, optionally rejecting a stale revision.</summary>
     public Task<JsonElement> SetDocumentAsync(JsonElement document, long? expectedRevision = null, CancellationToken token = default) =>
         InvokeAsync("setDocument", Parameters(("document", document), ("expectedRevision", expectedRevision)), token);
+    /// <summary>Selects a UTF-16 plain-text offset range.</summary>
     public Task<JsonElement> SelectAsync(int start, int end, CancellationToken token = default) => InvokeAsync("select", new { start, end }, token);
+    /// <summary>Replaces the current selection with plain text.</summary>
     public Task<JsonElement> InsertTextAsync(string text, CancellationToken token = default) => InvokeAsync("insertText", new { text }, token);
+    /// <summary>Applies a formatting property to the selection.</summary>
     public Task<JsonElement> ApplyPropertyValueAsync(string name, object? value, CancellationToken token = default) => InvokeAsync("applyProperty", new { name, value }, token);
+    /// <summary>Executes a named editing command supported by the engine.</summary>
     public Task<JsonElement> ExecuteAsync(string command, object? parameter = null, CancellationToken token = default) => InvokeAsync("execute", new { command, parameter }, token);
+    /// <summary>Undoes the last engine transaction.</summary>
     public Task<JsonElement> UndoAsync(CancellationToken token = default) => InvokeAsync("undo", cancellationToken: token);
+    /// <summary>Reapplies the last undone transaction.</summary>
     public Task<JsonElement> RedoAsync(CancellationToken token = default) => InvokeAsync("redo", cancellationToken: token);
+
+    /// <summary>Invokes a named document feature using JSON arguments and optional revision checking.</summary>
+    /// <remarks>Supported operations: InsertField, UpdateFields, SetStory, InsertNote, UpdateNote, InsertTableOfContents, UpdateTableOfContents, MailMerge.</remarks>
+    public Task<JsonElement> DocumentFeatureAsync(string operation, object? arguments = null, long? expectedRevision = null, CancellationToken cancellationToken = default)
+    {
+        string method = operation switch
+        {
+            "InsertField" => "insertField", "UpdateFields" => "updateFields", "SetStory" => "setStory",
+            "InsertNote" => "insertNote", "UpdateNote" => "updateNote", "InsertTableOfContents" => "insertTableOfContents",
+            "UpdateTableOfContents" => "updateTableOfContents", "MailMerge" => "mailMerge",
+            _ => throw new ArgumentException("Unknown document feature operation", nameof(operation))
+        };
+        var parameters = new Dictionary<string, object?>();
+        if (arguments is not null)
+        {
+            JsonElement json = JsonSerializer.SerializeToElement(arguments);
+            if (json.ValueKind != JsonValueKind.Object) throw new ArgumentException("Feature arguments must serialize to a JSON object", nameof(arguments));
+            foreach (var property in json.EnumerateObject()) parameters.Add(property.Name, property.Value.Clone());
+        }
+        if (expectedRevision.HasValue) parameters["expectedRevision"] = expectedRevision.Value;
+        return InvokeAsync(method, parameters, cancellationToken);
+    }
+
+    /// <summary>Fetches tracking state, current author and recorded revisions.</summary>
+    public Task<JsonElement> GetReviewStateAsync(CancellationToken cancellationToken = default) => InvokeAsync("getReviewState", cancellationToken: cancellationToken);
 
     private static Dictionary<string, object?> Parameters(params (string Name, object? Value)[] pairs) =>
         pairs.Where(pair => pair.Value is not null).ToDictionary(pair => pair.Name, pair => pair.Value);
@@ -103,6 +154,7 @@ public sealed class RichTextDocumentClient : INotifyPropertyChanged, IDisposable
                 case "event":
                     string eventName = root.GetProperty("event").GetString() ?? throw new JsonException("Missing event name");
                     JsonElement payload = root.GetProperty("payload").Clone();
+                    if (eventName is "ready" or "documentChanged") ValidateState(payload);
                     if (eventName == "ready") _ready.TrySetResult();
                     Dispatch(() =>
                     {
@@ -120,6 +172,15 @@ public sealed class RichTextDocumentClient : INotifyPropertyChanged, IDisposable
         }
     }
 
+    private static void ValidateState(JsonElement state)
+    {
+        if (state.ValueKind != JsonValueKind.Object) throw new JsonException("State payload must be an object");
+        if (state.TryGetProperty("revision", out var revision) && (!revision.TryGetInt64(out long value) || value < 0)) throw new JsonException("Invalid document revision");
+        foreach (string name in new[] { "canUndo", "canRedo" })
+            if (state.TryGetProperty(name, out var boolean) && boolean.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new JsonException("Invalid command state");
+        if (state.TryGetProperty("document", out var document) && document.ValueKind != JsonValueKind.Object) throw new JsonException("Invalid document snapshot");
+    }
+
     private void ApplyState(JsonElement state)
     {
         if (state.TryGetProperty("revision", out var revision)) { Revision = revision.GetInt64(); Notify(nameof(Revision)); }
@@ -133,6 +194,7 @@ public sealed class RichTextDocumentClient : INotifyPropertyChanged, IDisposable
         if (_context is not null && SynchronizationContext.Current != _context) _context.Post(_ => callback(), null);
         else callback();
     }
+    /// <summary>Detaches the transport and cancels all pending requests.</summary>
     public void Dispose()
     {
         if (_disposed) return;

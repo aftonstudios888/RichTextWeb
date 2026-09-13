@@ -156,7 +156,11 @@ export async function runReviewBrowserChecks(page) {
         ["text-color", "#ff0000", "input"],
         ["highlight-color", "#00ff00", "input"],
       ]) {
-        const input = document.getElementById(id);
+        const input =
+          document.getElementById(id) ??
+          document
+            .querySelector("rich-text-toolbar")
+            .shadowRoot.getElementById(id);
         input.value = value;
         input.dispatchEvent(new Event(event, { bubbles: true }));
       }

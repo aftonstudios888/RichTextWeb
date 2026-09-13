@@ -12,3 +12,4 @@ Runtime dependencies retain their own licenses:
 
 Bundled dependencies' legal comments are retained in adjacent .LEGAL.txt
 files. See dependency package distributions for full third-party notices.
+PDF import and preview use Mozilla PDF.js (pdfjs-dist), distributed under the Apache License 2.0. Its license is included with the redistributed PDF worker and assets in dist/pdf-assets/LICENSE.

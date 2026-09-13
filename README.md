@@ -9,7 +9,7 @@ A reusable rich text engine and flow document library for JavaScript, TypeScript
 
 **[Open Document Studio](https://wieslawsoltes.github.io/RichTextWeb/) · [Download releases](https://github.com/wieslawsoltes/RichTextWeb/releases) · [API and migration](docs/INTEGRATION.md) · [Compatibility](docs/COMPATIBILITY.md)**
 
-RichTextWeb 0.1 provides a working document engine and reusable editor. **It is not complete Word, WPF, WinUI, or Avalonia API and rendering parity.** It implements familiar public API patterns in JavaScript; its desktop adapters host the same web engine. Exact native pagination, complete Office formats, native arbitrary PDF text editing, and the entire WPF document API are outside this release's implemented surface. Read the compatibility matrix before migration.
+RichTextWeb 0.2 adds reversible patch history, live text positions, tracked-change review, collaborative text operations, measured page viewing, headers/footers, fields, notes, mail merge, PDF text reconstruction, and reusable editing tools. The public APIs follow familiar .NET patterns and work through web components, React and MVVM. Its desktop adapters host the same web engine. Complete Word/WPF API and rendering parity remains a larger compatibility target; the [compatibility matrix](docs/COMPATIBILITY.md) distinguishes implemented behavior from remaining boundaries.
 
 ## Install
 
@@ -19,7 +19,7 @@ npm install @wieslawsoltes/richtextweb
 npm install react react-dom
 ```
 
-Node.js 22+ for package tooling and headless use. Browser rendering requires modern custom elements, Shadow DOM, and the Selection/beforeinput APIs. The engine itself has no DOM or React dependency.
+Node.js 22.13+ for package tooling and headless use. Browser rendering requires modern custom elements, Shadow DOM, and the Selection/beforeinput APIs. The engine itself has no DOM or React dependency.
 
 ## Create a document and edit it
 
@@ -58,6 +58,7 @@ engine.Dispose();
 ## Web component
 
 ```html
+<rich-text-toolbar for="editor" mode="all"></rich-text-toolbar>
 <rich-text-box
   id="editor"
   view-mode="page"
@@ -160,7 +161,7 @@ The JSON message bridge exposes document loading, editing, selection, formatting
 | WinUI 3  | `WinUiRichTextHost.ConnectAsync`, WebView2 transport    | Windows App SDK and WebView2 runtime                  |
 | Avalonia | `AvaloniaRichTextHost.Connect`, NativeWebView transport | A compatible Avalonia NativeWebView component/runtime |
 
-`RichTextDocumentClient` provides asynchronous editing commands, request correlation, timeouts, cancellation and `INotifyPropertyChanged` notifications for revision, undo/redo state and optional document snapshots. All hosts execute the JavaScript engine inside their WebView. The C# sources have not been compiled or exercised in native applications; compile them with the application's framework dependencies and qualify the target platforms before deployment.
+`RichTextDocumentClient` provides asynchronous editing commands, request correlation, timeouts, cancellation and `INotifyPropertyChanged` notifications for revision, undo/redo state and optional document snapshots. All hosts execute the JavaScript engine inside their WebView. Version 0.2 provides compiled shared/WPF/Avalonia projects, executable C# protocol checks against the real Node engine, and a Windows WPF/WebView2 smoke workflow. Native runtime results and artifacts are reported by CI; WinUI/Avalonia UI, physical input and assistive technology need target-specific qualification.
 
 See [complete integration examples](docs/INTEGRATION.md) for React refs/hooks, bridge setup, transport ownership, threading and lifecycle cleanup. The [native host guide](adapters/dotnet/README.md) explains asset packaging, UI-thread requirements and trusted-document navigation.
 
@@ -241,3 +242,28 @@ The npm workflow downloads the immutable GitHub release tarball, verifies its ch
 - [Verification and performance](docs/VERIFICATION.md)
 
 MIT licensed. This is an independent implementation; it does not contain the proprietary Word engine. Public WPF document concepts were checked against Microsoft's [Flow Document overview](https://learn.microsoft.com/en-us/dotnet/desktop/wpf/advanced/flow-document-overview) and [RichTextBox overview](https://learn.microsoft.com/en-us/dotnet/desktop/wpf/controls/richtextbox). These references describe the migration target, not a claim that every feature is implemented.
+
+## Advanced editing and document generation
+
+The standalone `RichTextToolbar` provides formatting, table and image tools, fields, notes, headers/footers, comments and tracked-change review. It binds to an existing `RichTextBox` and uses that control's engine, selection, history and read-only state. The sample's Home and Advanced tools tabs use this component.
+
+```ts
+import { DocumentFeatures } from "@wieslawsoltes/richtextweb";
+const features = new DocumentFeatures(editor.Engine);
+features.InsertField("MERGEFIELD", "Customer");
+features.InsertNote("Footnote", "Source note");
+features.InsertTableOfContents({ MaxLevel: 3 });
+const mergedDocuments = features.MailMerge([
+  { Customer: "Ada" },
+  { Customer: "Grace" },
+]);
+
+editor.Engine.CurrentAuthor = "Editor";
+editor.Engine.TrackChanges = true;
+editor.Engine.InsertText("A proposed addition");
+editor.Engine.RejectAllRevisions();
+```
+
+Use `FlowDocumentPageViewer.Repaginate()` to obtain measured page ranges, overflow diagnostics, headers/footers and footnote areas. Use the separate `/pdf` entry point for PDF.js text extraction, reconstructed editable flow documents and the `rich-pdf-editor` control. The PDF worker and font/CMap assets are distributed in `dist/pdf-assets`; loading them is optional for applications that only need the core editor or PDF generation.
+
+Read [document features and toolbar APIs](docs/DOCUMENT-FEATURES.md), [page-view APIs](docs/CONTROL.md), [PDF import and editing](docs/PDF.md) and [verification](docs/VERIFICATION.md) before choosing the relevant integration surface.

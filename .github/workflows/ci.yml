@@ -10,6 +10,8 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  desktop:
+    uses: ./.github/workflows/desktop.yml
   verify:
     runs-on: ubuntu-latest
     strategy:
@@ -37,7 +39,7 @@ jobs:
             benchmark.json
           if-no-files-found: ignore
   package:
-    needs: verify
+    needs: [verify, desktop]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -50,10 +52,16 @@ jobs:
       - run: npm run build
       - run: npm run build:demo
       - run: npm pack --ignore-scripts
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          path: artifacts/desktop
+          merge-multiple: true
       - name: Archive standalone library and sample
         run: |
           tar -czf richtextweb-browser.tar.gz -C dist .
           tar -czf richtextweb-sample.tar.gz -C site .
+          tar -czf richtextweb-desktop.tar.gz -C artifacts/desktop .
           git archive --format=tar.gz -o richtextweb-source.tar.gz HEAD
           sha256sum *.tgz *.tar.gz > SHA256SUMS.txt
       - uses: actions/upload-artifact@v7

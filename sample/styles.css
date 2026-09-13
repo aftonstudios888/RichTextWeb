@@ -1015,3 +1015,62 @@ rich-text-box::part(editor) {
 .pdf-tools .field {
   margin: 0;
 }
+rich-text-toolbar {
+  width: 100%;
+}
+.ribbon:has(rich-text-toolbar) {
+  padding: 5px 14px;
+  height: auto;
+  min-height: 96px;
+}
+.page-preview-dialog {
+  width: min(1120px, 96vw);
+  max-height: 94vh;
+}
+.page-preview-dialog flow-document-page-viewer {
+  display: block;
+  max-height: 80vh;
+  overflow: auto;
+}
+body.dark rich-text-toolbar {
+  --rt-toolbar-background: #1c2a40;
+  --rt-toolbar-color: #dce6f5;
+  --rt-toolbar-border: #35455c;
+  --rt-toolbar-hover: #2b4162;
+}
+.pdf-workspace-dialog {
+  width: min(1200px, 96vw);
+  height: 90vh;
+}
+.pdf-workspace-dialog rich-pdf-editor {
+  display: block;
+  height: calc(100% - 64px);
+}
+.collaboration-dialog {
+  width: min(1320px, 96vw);
+  max-height: 94vh;
+}
+.collaboration-peers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.collaboration-peers section {
+  min-width: 0;
+}
+.collaboration-peers rich-text-box {
+  display: block;
+  height: 360px;
+  border: 1px solid #cbd5e1;
+}
+.collaboration-actions {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  margin: 12px 0;
+}
+@media (max-width: 800px) {
+  .collaboration-peers {
+    grid-template-columns: 1fr;
+  }
+}

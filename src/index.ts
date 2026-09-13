@@ -4,3 +4,7 @@ export * from "./formats.js";
 export * from "./control.js";
 export * from "./mvvm.js";
 export * from "./bridge.js";
+export * from "./document-features.js";
+export * from "./toolbar.js";
+export * from "./history.js";
+export * from "./collaboration.js";

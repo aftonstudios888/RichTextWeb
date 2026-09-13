@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(UsePackagedBridge)' != 'true'"><ProjectReference Include="../Shared/RichTextWeb.Bridge.csproj" /></ItemGroup>
+  <ItemGroup Condition="'$(UsePackagedBridge)' == 'true'"><PackageReference Include="RichTextWeb.Bridge" Version="$(Version)" /></ItemGroup>
+</Project>

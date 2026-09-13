@@ -385,3 +385,119 @@ test("React adapter renders on the server without HTMLElement or customElements"
   assert.match(html, /aria-label="Shared document"/);
   assert.doesNotMatch(html, /\[object Object\]/);
 });
+
+test("native document feature bridge validates fields, stories, notes, TOC and merge", () => {
+  const engine = new RichTextEngine(doc("Heading"));
+  engine.Document.Blocks.Get(0).SetValue("HeadingLevel", 1);
+  let readOnly = false;
+  const bridge = new RichTextWebBridge(engine, () => {}, {
+    isReadOnly: () => readOnly,
+  });
+  const call = (method: string, params: Record<string, unknown> = {}) =>
+    bridge.HandleMessage(request(method, params));
+  engine.Select(engine.Document.Text.length, engine.Document.Text.length);
+  assert.equal(
+    call("insertField", { type: "MERGEFIELD", argument: "Name" }).error,
+    undefined,
+  );
+  const template = engine.Document.ToJSON();
+  const merged = call("mailMerge", {
+    records: [{ Name: "Ada" }, { Name: "Lin" }],
+  });
+  assert.equal(merged.error, undefined);
+  assert.equal((merged.result as unknown[]).length, 2);
+  assert.match(JSON.stringify(merged.result), /Ada/);
+  assert.deepEqual(
+    engine.Document.ToJSON(),
+    template,
+    "Mail merge must not mutate the live template",
+  );
+  assert.equal(
+    call("updateFields", {
+      context: { Data: { Name: "Grace" }, Now: "2026-09-13T12:00:00Z" },
+    }).error,
+    undefined,
+  );
+  assert.match(engine.Document.Text, /Grace/);
+  const header = new Paragraph(new Run("Header")).ToJSON();
+  assert.equal(
+    call("setStory", { kind: "Headers", blocks: [header] }).error,
+    undefined,
+  );
+  assert.match(
+    JSON.stringify(engine.Document.ToJSON().props.Headers),
+    /Header/,
+  );
+  const note = call("insertNote", { kind: "Footnote", content: "Note text" });
+  assert.equal(note.error, undefined);
+  const noteId = (note.result as { id: string }).id;
+  assert.equal(
+    call("updateNote", {
+      kind: "Footnote",
+      id: noteId,
+      content: "Changed note",
+    }).error,
+    undefined,
+  );
+  assert.match(
+    JSON.stringify(engine.Document.ToJSON().props.Footnotes),
+    /Changed note/,
+  );
+  assert.equal(
+    call("insertTableOfContents", {
+      options: { Title: "Contents", MaxLevel: 3 },
+      context: { PageMap: { [engine.Document.Blocks.Get(0).Id]: 2 } },
+    }).error,
+    undefined,
+  );
+  assert.equal(call("updateTableOfContents").error, undefined);
+  assert.ok(
+    Array.isArray(
+      (call("getReviewState").result as { revisions: unknown[] }).revisions,
+    ),
+  );
+  const before = engine.Document.ToJSON();
+  assert.equal(
+    call("insertField", { type: "SCRIPT" }).error?.code,
+    "invalid_params",
+  );
+  assert.equal(
+    call("updateFields", { context: { PageNumber: -1 } }).error?.code,
+    "invalid_params",
+  );
+  assert.equal(
+    call("updateFields", { context: { Now: "bad-date" } }).error?.code,
+    "invalid_params",
+  );
+  assert.equal(
+    call("updateFields", { context: { PageOfNode: "code" } }).error?.code,
+    "invalid_params",
+  );
+  assert.equal(
+    call("insertTableOfContents", { options: { MaxLevel: 100 } }).error?.code,
+    "invalid_params",
+  );
+  assert.equal(
+    call("setStory", {
+      kind: "Headers",
+      blocks: [{ ...header, type: "Unsupported" }],
+    }).error?.code,
+    "invalid_document",
+  );
+  assert.equal(
+    call("insertField", { type: "PAGE", expectedRevision: -1 }).error?.code,
+    "revision_conflict",
+  );
+  readOnly = true;
+  assert.equal(
+    call("insertNote", { kind: "Footnote", content: "Blocked" }).error?.code,
+    "read_only",
+  );
+  assert.equal(
+    call("mailMerge", { records: [{ Name: "Read only export" }] }).error,
+    undefined,
+  );
+  assert.deepEqual(engine.Document.ToJSON(), before);
+  bridge.Dispose();
+  engine.Dispose();
+});

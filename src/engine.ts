@@ -23,6 +23,16 @@ import {
   uid,
 } from "./engine-tree.js";
 
+import {
+  DocumentObserverError,
+  CreateDocumentPatch,
+  InvertDocumentPatch,
+  ApplyDocumentPatch,
+  ReconcileDocument,
+  PatchByteLength,
+  type DocumentPatch,
+} from "./history.js";
+
 export interface FindOptions {
   MatchCase?: boolean;
   WholeWord?: boolean;
@@ -51,6 +61,22 @@ export interface SelectionChangedEvent {
   Engine: RichTextEngine;
   Start: number;
   End: number;
+}
+interface CursorState {
+  start: number;
+  end: number;
+  typing: Record<string, any>;
+}
+interface TextEditSpan {
+  Start: number;
+  RemovedLength: number;
+  InsertedLength: number;
+}
+interface HistoryEntry {
+  patch: DocumentPatch;
+  before: CursorState;
+  after: CursorState;
+  textChanges?: TextEditSpan[];
 }
 interface Snapshot {
   document: DocumentNode;
@@ -229,15 +255,27 @@ export class RichTextEngine {
   readonly Changed = new EventDispatcher<EngineChangedEvent>();
   readonly SelectionChanged = new EventDispatcher<SelectionChangedEvent>();
   private subscription: { Dispose(): void };
-  private undoStack: Snapshot[] = [];
-  private redoStack: Snapshot[] = [];
+  private undoStack: HistoryEntry[] = [];
+  private redoStack: HistoryEntry[] = [];
   private typing: Record<string, any> = {};
   private start = 0;
   private end = 0;
   private depth = 0;
   private batch?: Snapshot;
+  private batchTokens?: number[];
+  private batchTokensValid = true;
   private disposed = false;
   UndoLimit = 100;
+  /** Track text replacements as reviewable insertion/deletion annotations. */
+  TrackChanges = false;
+  CurrentAuthor = "Author";
+  private reviewSuppressed = 0;
+
+  get Revisions(): DocumentAnnotation[] {
+    return this.Annotations.filter(
+      (item) => item.Kind === "Insertion" || item.Kind === "Deletion",
+    );
+  }
 
   constructor(document = new FlowDocument()) {
     this._document = document;
@@ -253,11 +291,51 @@ export class RichTextEngine {
   get SelectionEnd(): number {
     return this.end;
   }
+  CaptureSelectionState(): {
+    Start: number;
+    End: number;
+    TypingProperties: Record<string, any>;
+  } {
+    return {
+      Start: this.start,
+      End: this.end,
+      TypingProperties: clone(this.typing),
+    };
+  }
+  RestoreSelectionState(state: {
+    Start: number;
+    End: number;
+    TypingProperties: Record<string, any>;
+  }): void {
+    this.Select(
+      Math.min(state.Start, this.Document.Text.length),
+      Math.min(state.End, this.Document.Text.length),
+    );
+    this.typing = clone(state.TypingProperties);
+    this.emitSelection();
+  }
+  ResetInsertionFormatting(): void {
+    this.typing = {};
+  }
   get CanUndo(): boolean {
     return this.undoStack.length > 0;
   }
   get CanRedo(): boolean {
     return this.redoStack.length > 0;
+  }
+  get HistoryStatistics(): {
+    UndoEntries: number;
+    RedoEntries: number;
+    RetainedBytes: number;
+  } {
+    return {
+      UndoEntries: this.undoStack.length,
+      RedoEntries: this.redoStack.length,
+      RetainedBytes: [...this.undoStack, ...this.redoStack].reduce(
+        (sum, item) => sum + PatchByteLength(item.patch),
+        0,
+      ),
+    };
   }
   get Annotations(): DocumentAnnotation[] {
     return clone(this.Document.ToJSON().props.Annotations ?? []);
@@ -309,18 +387,30 @@ export class RichTextEngine {
     this.emitSelection();
   }
   /** Replace all content while retaining the document object, subscribers, and undo. */
-  ReplaceDocument(document: FlowDocument): void {
-    this.mutate((root) => {
-      const replacement = clone(document.ToJSON());
-      root.props = replacement.props;
-      root.children = replacement.children;
-      root.text = replacement.text;
-    });
+  ReplaceDocument(
+    document: FlowDocument,
+    options?: { MapAnnotations?: boolean; TextChanges?: TextEditSpan[] },
+  ): void {
+    this.mutate(
+      (root) => {
+        const replacement = clone(document.ToJSON());
+        root.props = replacement.props;
+        root.children = replacement.children;
+        root.text = replacement.text;
+      },
+      options?.MapAnnotations !== false,
+      options?.TextChanges,
+    );
   }
   BeginChange(): void {
     this.assertLive();
     if (this.depth++ === 0) {
       this.batch = this.snapshot();
+      this.batchTokens = Array.from(
+        { length: plainText(this.batch.document).length },
+        (_, index) => index,
+      );
+      this.batchTokensValid = true;
       this.Document.BeginChange();
     }
   }
@@ -334,8 +424,19 @@ export class RichTextEngine {
         JSON.stringify(this.batch.document) !==
           JSON.stringify(this.Document.ToJSON())
       )
-        this.record(this.batch);
+        this.record(
+          this.batch,
+          this.Document.ToJSON(),
+          this.batchTokensValid && this.batchTokens
+            ? spansFromTokens(
+                this.batchTokens,
+                plainText(this.batch.document),
+                this.Document.Text,
+              )
+            : undefined,
+        );
       this.batch = undefined;
+      this.batchTokens = undefined;
       this.Document.EndChange();
     }
   }
@@ -355,39 +456,80 @@ export class RichTextEngine {
     this.assertLive();
     if (this.depth)
       throw new Error("Finish the change transaction before undo.");
-    const state = this.undoStack.pop();
-    if (!state) return false;
-    this.redoStack.push(this.snapshot());
-    this.restore(state);
+    const entry = this.undoStack.at(-1);
+    if (!entry) return false;
+    const old = this.cursor();
+    this.setCursor(entry.before);
+    let observerError: DocumentObserverError | undefined;
+    try {
+      if (entry.textChanges)
+        this.Document.SetPendingTextChanges(inverseSpans(entry.textChanges));
+      ApplyDocumentPatch(this.Document, InvertDocumentPatch(entry.patch));
+    } catch (error) {
+      if (error instanceof DocumentObserverError) observerError = error;
+      else {
+        this.Document.SetPendingTextChanges([]);
+        this.setCursor(old);
+        throw error;
+      }
+    }
+    this.undoStack.pop();
+    this.redoStack.push(entry);
+    this.emitSelection();
+    if (observerError) throw observerError;
     return true;
   }
   Redo(): boolean {
     this.assertLive();
     if (this.depth)
       throw new Error("Finish the change transaction before redo.");
-    const state = this.redoStack.pop();
-    if (!state) return false;
-    this.undoStack.push(this.snapshot());
-    this.restore(state);
+    const entry = this.redoStack.at(-1);
+    if (!entry) return false;
+    const old = this.cursor();
+    this.setCursor(entry.after);
+    let observerError: DocumentObserverError | undefined;
+    try {
+      if (entry.textChanges)
+        this.Document.SetPendingTextChanges(entry.textChanges);
+      ApplyDocumentPatch(this.Document, entry.patch);
+    } catch (error) {
+      if (error instanceof DocumentObserverError) observerError = error;
+      else {
+        this.Document.SetPendingTextChanges([]);
+        this.setCursor(old);
+        throw error;
+      }
+    }
+    this.redoStack.pop();
+    this.undoStack.push(entry);
+    this.emitSelection();
+    if (observerError) throw observerError;
     return true;
   }
-  private snapshot(): Snapshot {
-    return {
-      document: clone(this.Document.ToJSON()),
-      start: this.start,
-      end: this.end,
-      typing: clone(this.typing),
-    };
+  private cursor(): CursorState {
+    return { start: this.start, end: this.end, typing: clone(this.typing) };
   }
-  private restore(state: Snapshot): void {
+  private setCursor(state: CursorState): void {
     this.start = state.start;
     this.end = state.end;
     this.typing = clone(state.typing);
-    this.Document.ReplaceWith(FlowDocument.FromJSON(state.document));
-    this.emitSelection();
   }
-  private record(state: Snapshot): void {
-    this.undoStack.push(state);
+  private snapshot(): Snapshot {
+    return { ...this.cursor(), document: this.Document.ToJSON() };
+  }
+  private record(
+    state: Snapshot,
+    after = this.Document.ToJSON(),
+    textChanges?: TextEditSpan[],
+  ): void {
+    const patch = CreateDocumentPatch(state.document, after);
+    if (!patch) return;
+    this.undoStack.push({
+      patch,
+      before: { start: state.start, end: state.end, typing: state.typing },
+      after: this.cursor(),
+      ...(textChanges?.length ? { textChanges } : {}),
+    });
     if (this.undoStack.length > Math.max(0, this.UndoLimit))
       this.undoStack.splice(
         0,
@@ -405,6 +547,7 @@ export class RichTextEngine {
   private mutate(
     action: (root: DocumentNode) => void,
     mapStructure = true,
+    exactTextChange?: TextEditSpan | TextEditSpan[],
   ): void {
     this.assertLive();
     const before = this.snapshot(),
@@ -416,14 +559,42 @@ export class RichTextEngine {
       if (
         JSON.stringify(before.document) !== JSON.stringify(document.ToJSON())
       ) {
-        if (!this.depth) this.record(before);
-        this.Document.ReplaceWith(document);
+        const spans = exactTextChange
+          ? Array.isArray(exactTextChange)
+            ? exactTextChange
+            : [exactTextChange]
+          : undefined;
+        const exact =
+          spans &&
+          document.Text.length ===
+            plainText(before.document).length +
+              spans.reduce(
+                (sum, span) => sum + span.InsertedLength - span.RemovedLength,
+                0,
+              )
+            ? spans
+            : undefined;
+        if (!this.depth) this.record(before, document.ToJSON(), exact);
+        if (exact) {
+          this.Document.SetPendingTextChanges(exact);
+          if (this.depth && this.batchTokens)
+            for (const span of [...exact].reverse())
+              this.batchTokens = [
+                ...this.batchTokens.slice(0, span.Start),
+                ...Array(span.InsertedLength).fill(-1),
+                ...this.batchTokens.slice(span.Start + span.RemovedLength),
+              ];
+        } else if (plainText(before.document) !== document.Text && this.depth)
+          this.batchTokensValid = false;
+        ReconcileDocument(this.Document, document.ToJSON());
+        if (exact) this.Document.GetSymbolMap();
       }
       const length = this.Document.Text.length;
       this.start = Math.min(this.start, length);
       this.end = Math.max(this.start, Math.min(this.end, length));
       this.emitSelection();
     } catch (error) {
+      if (error instanceof DocumentObserverError) throw error;
       this.start = before.start;
       this.end = before.end;
       this.typing = before.typing;
@@ -437,22 +608,140 @@ export class RichTextEngine {
     if (!text && this.start === this.end) return;
     text = text.replace(/\r\n?/g, "\n");
     const props = this.insertionProperties();
-    this.mutate((root) => {
-      const from = this.start,
-        to = this.end,
-        previousLength = plainText(root).length;
-      deleteRange(root, from, to);
-      const position = Math.min(from, plainText(root).length);
-      this.start = this.end = text
-        ? insertText(root, position, text, props)
-        : position;
-      mapMetadata(
-        root,
-        from,
-        to,
-        plainText(root).length - previousLength + to - from,
+    this.mutate(
+      (root) => {
+        const from = this.start,
+          to = this.end,
+          previousLength = plainText(root).length;
+        const tracked = this.TrackChanges && !this.reviewSuppressed;
+        const deletion =
+          tracked && to > from ? captureDeletion(root, from, to) : undefined;
+        deleteRange(root, from, to);
+        const position = Math.min(from, plainText(root).length);
+        this.start = this.end = text
+          ? insertText(root, position, text, props)
+          : position;
+        mapMetadata(
+          root,
+          from,
+          to,
+          plainText(root).length - previousLength + to - from,
+        );
+        if (tracked) {
+          const CreatedAt = new Date().toISOString(),
+            Author = this.CurrentAuthor;
+          if (deletion)
+            (root.props.Annotations ??= []).push({
+              Id: uid(),
+              Kind: "Deletion",
+              Start: position,
+              End: position,
+              Data: { Author, CreatedAt, ...deletion },
+            });
+          if (text)
+            (root.props.Annotations ??= []).push({
+              Id: uid(),
+              Kind: "Insertion",
+              Start: position,
+              End: position + text.length,
+              Data: { Author, CreatedAt, Text: text },
+            });
+        }
+      },
+      false,
+      {
+        Start: this.start,
+        RemovedLength: this.end - this.start,
+        InsertedLength: text.length,
+      },
+    );
+  }
+  AcceptRevision(id: string): void {
+    const item = this.Revisions.find((change) => change.Id === id);
+    if (!item) throw new Error(`Revision ${id} was not found.`);
+    this.RemoveAnnotation(id);
+  }
+  RejectRevision(id: string): void {
+    const item = this.Revisions.find((change) => change.Id === id);
+    if (!item) throw new Error(`Revision ${id} was not found.`);
+    if (
+      item.Kind === "Insertion" &&
+      item.Data.Text !== undefined &&
+      this.Document.Text.slice(item.Start, item.End) !== item.Data.Text
+    )
+      throw new Error(
+        "Revision conflict: inserted text has been edited; resolve dependent revisions before rejecting this insertion.",
       );
-    }, false);
+    if (item.Kind === "Insertion") {
+      const check = this.Document.ToJSON(),
+        length = this.Document.Text.length;
+      deleteRange(check, item.Start, item.End);
+      if (plainText(check).length !== length - (item.End - item.Start))
+        throw new Error(
+          "Revision conflict: an insertion crosses protected structural boundaries.",
+        );
+    }
+    this.Change(() => {
+      this.reviewSuppressed++;
+      try {
+        if (item.Kind === "Insertion") {
+          this.Select(item.Start, item.End);
+          this.InsertText("");
+        } else if (Array.isArray(item.Data.Segments)) {
+          this.mutate((root) => {
+            const blocks = textBlocks(root);
+            const locations = item.Data.Segments.map((segment: any) => {
+              const block = blocks.find(
+                (candidate) => candidate.node.id === segment.BlockId,
+              );
+              if (
+                !block ||
+                block.node.type !== "Paragraph" ||
+                segment.Offset > block.text.length ||
+                block.text !== segment.RemainingText
+              )
+                throw new Error(
+                  "Revision conflict: a deleted-text container has changed or is no longer available.",
+                );
+              return { block, segment };
+            });
+            for (const { block, segment } of locations.reverse()) {
+              block.node.children = [
+                ...sliceInlines(block.node.children ?? [], 0, segment.Offset),
+                ...segment.Inlines.map(newIds),
+                ...sliceInlines(
+                  block.node.children ?? [],
+                  segment.Offset,
+                  inlineText(block.node).length,
+                  true,
+                ),
+              ];
+            }
+          });
+        } else {
+          this.Select(item.Start, item.Start);
+          if (Array.isArray(item.Data.Nodes) && item.Data.Nodes.length)
+            this.InsertFragment(item.Data.Nodes);
+          else this.InsertText(String(item.Data.Text ?? ""));
+        }
+        this.RemoveAnnotation(id);
+      } finally {
+        this.reviewSuppressed--;
+      }
+    });
+  }
+  AcceptAllRevisions(): void {
+    this.Change(() => {
+      for (const item of this.Revisions) this.AcceptRevision(item.Id);
+    });
+  }
+  RejectAllRevisions(): void {
+    // Work newest-first so a replacement's insertion is rejected before its
+    // deletion is restored, and dependent edits unwind in their original order.
+    this.Change(() => {
+      for (const item of [...this.Revisions].reverse())
+        this.RejectRevision(item.Id);
+    });
   }
   ReplaceSelection(text: string): void {
     this.InsertText(text);
@@ -534,11 +823,11 @@ export class RichTextEngine {
     if (
       !this.depth &&
       last &&
-      last.start === selection[0] &&
-      last.end === selection[1]
+      last.before.start === selection[0] &&
+      last.before.end === selection[1]
     ) {
-      last.start = previousStart;
-      last.end = previousEnd;
+      last.before.start = previousStart;
+      last.before.end = previousEnd;
     }
   }
   private insertionProperties(): Record<string, any> {
@@ -686,9 +975,7 @@ export class RichTextEngine {
         if (inserted[0].type === "Paragraph")
           inserted[0].children = [...before, ...(inserted[0].children ?? [])];
         else if (before.length)
-          replacement.push(
-            makeNode("Paragraph", before, clone(block.node.props)),
-          );
+          replacement.push({ ...clone(block.node), children: before });
         replacement.push(...inserted);
         const tail = inserted.at(-1)!;
         const tailTextBefore = inlineText(tail).length;
@@ -696,7 +983,9 @@ export class RichTextEngine {
           tail.children = [...(tail.children ?? []), ...after];
         else if (after.length)
           replacement.push(
-            makeNode("Paragraph", after, clone(block.node.props)),
+            local === 0
+              ? clone(block.node)
+              : makeNode("Paragraph", after, clone(block.node.props)),
           );
         block.parent.children!.splice(block.index, 1, ...replacement);
         const resultingBlocks = textBlocks(root);
@@ -1242,6 +1531,24 @@ export class RichTextEngine {
           parameter.Replacement,
           parameter.Options,
         );
+      case "currentauthor":
+        if (typeof parameter !== "string")
+          throw new TypeError("CurrentAuthor requires a string.");
+        this.CurrentAuthor = parameter;
+        return;
+      case "trackchanges":
+        if (parameter !== undefined && typeof parameter !== "boolean")
+          throw new TypeError("TrackChanges requires a boolean.");
+        this.TrackChanges = parameter ?? !this.TrackChanges;
+        return this.TrackChanges;
+      case "acceptrevision":
+        return this.AcceptRevision(parameter);
+      case "rejectrevision":
+        return this.RejectRevision(parameter);
+      case "acceptallrevisions":
+        return this.AcceptAllRevisions();
+      case "rejectallrevisions":
+        return this.RejectAllRevisions();
       case "addcomment":
         return this.AddComment(
           typeof parameter === "string" ? parameter : parameter.Text,
@@ -1266,6 +1573,45 @@ function containsNode(node: DocumentNode, id: string): boolean {
   return (
     node.id === id || !!node.children?.some((child) => containsNode(child, id))
   );
+}
+function captureDeletion(
+  root: DocumentNode,
+  start: number,
+  end: number,
+): Record<string, any> {
+  const blocks = textBlocks(root).filter(
+      (block) => block.end >= start && block.start < end,
+    ),
+    first = blocks[0];
+  const Nodes = blocks.map((block) => ({
+    ...clone(block.node),
+    children:
+      block.node.type === "Paragraph"
+        ? sliceInlines(
+            block.node.children ?? [],
+            Math.max(0, start - block.start),
+            Math.min(block.text.length, end - block.start),
+          )
+        : block.node.children,
+  }));
+  const data: Record<string, any> = {
+    Text: plainText(root).slice(start, end),
+    Nodes,
+  };
+  if (first && blocks.some((block) => block.parent !== first.parent))
+    data.Segments = blocks
+      .filter((block) => block.node.type === "Paragraph")
+      .map((block) => {
+        const from = Math.max(0, start - block.start),
+          to = Math.min(block.text.length, end - block.start);
+        return {
+          BlockId: block.node.id,
+          Offset: from,
+          RemainingText: block.text.slice(0, from) + block.text.slice(to),
+          Inlines: sliceInlines(block.node.children ?? [], from, to),
+        };
+      });
+  return data;
 }
 function findParent(root: DocumentNode, id: string): DocumentNode | undefined {
   if (root.children?.some((child) => child.id === id)) return root;
@@ -1371,7 +1717,10 @@ function mapStructuralAnnotations(
   };
   for (const item of after.props.Annotations as DocumentAnnotation[]) {
     item.Start = move(item.Start, false);
-    item.End = Math.max(item.Start, move(item.End, true));
+    item.End =
+      item.Kind === "Deletion"
+        ? item.Start
+        : Math.max(item.Start, move(item.End, true));
   }
 }
 
@@ -1408,3 +1757,52 @@ export const ApplicationCommands = Object.freeze({
   Find: "Find",
   Replace: "ReplaceAll",
 });
+
+function inverseSpans(changes: TextEditSpan[]): TextEditSpan[] {
+  let delta = 0;
+  return changes.map((change) => {
+    const span = {
+      Start: change.Start + delta,
+      RemovedLength: change.InsertedLength,
+      InsertedLength: change.RemovedLength,
+    };
+    delta += change.InsertedLength - change.RemovedLength;
+    return span;
+  });
+}
+function spansFromTokens(
+  tokens: number[],
+  before: string,
+  after: string,
+): TextEditSpan[] | undefined {
+  if (
+    tokens.length !== after.length ||
+    tokens.some((token, index) => token >= 0 && before[token] !== after[index])
+  )
+    return undefined;
+  const spans: TextEditSpan[] = [];
+  let old = 0,
+    pending = 0;
+  for (const token of tokens) {
+    if (token < 0) {
+      pending++;
+      continue;
+    }
+    if (token !== old || pending) {
+      spans.push({
+        Start: old,
+        RemovedLength: token - old,
+        InsertedLength: pending,
+      });
+      pending = 0;
+    }
+    old = token + 1;
+  }
+  if (old !== before.length || pending)
+    spans.push({
+      Start: old,
+      RemovedLength: before.length - old,
+      InsertedLength: pending,
+    });
+  return spans;
+}

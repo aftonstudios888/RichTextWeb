@@ -4,9 +4,24 @@ import { fromHTML, toHTML, fromText } from "./formats.js";
 import {
   applyDocumentStyle,
   renderDocument,
+  reconcileDocumentDOM,
   thicknessCSS,
   type RenderResult,
+  type RenderStatistics,
 } from "./control-renderer.js";
+import {
+  measurePageLayout,
+  pageSettings,
+  type PageLayoutResult,
+  type PageSettings,
+} from "./pagination.js";
+import { RichTextToolbar } from "./toolbar.js";
+export type {
+  PageLayoutResult,
+  PageLayoutPage,
+  PageLayoutOverflow,
+  PageSettings,
+} from "./pagination.js";
 
 const HTMLElementBase: typeof HTMLElement =
   (globalThis as any).HTMLElement ?? class extends EventTarget {};
@@ -48,9 +63,9 @@ export class RichTextBox extends HTMLElementBase {
     ];
   }
   private _engine = new RichTextEngine();
-  private _editor: HTMLDivElement | null = null;
-  private _viewport: HTMLDivElement | null = null;
-  private _render: RenderResult | null = null;
+  protected _editor: HTMLDivElement | null = null;
+  protected _viewport: HTMLDivElement | null = null;
+  protected _render: RenderResult | null = null;
   private _readOnly = false;
   private _acceptsTab = false;
   private _zoom = 1;
@@ -404,8 +419,10 @@ export class RichTextBox extends HTMLElementBase {
     const scrollTop = this._viewport?.scrollTop || 0;
     const scrollLeft = this._viewport?.scrollLeft || 0;
     const json = this.Document.ToJSON();
-    this._render = renderDocument(json, this.ownerDocument);
-    this._editor.replaceChildren(this._render.fragment);
+    this._render = reconcileDocumentDOM(
+      this._editor,
+      renderDocument(json, this.ownerDocument, this._render?.templates),
+    );
     applyDocumentStyle(this._editor, json.props || {});
     const props = json.props || {};
     if (Number.isFinite(Number(props.PageWidth)) && Number(props.PageWidth) > 0)
@@ -431,6 +448,17 @@ export class RichTextBox extends HTMLElementBase {
       this._viewport.scrollTop = scrollTop;
       this._viewport.scrollLeft = scrollLeft;
     }
+  }
+
+  get RenderStatistics(): Readonly<RenderStatistics> {
+    return (
+      this._render?.statistics || {
+        Created: 0,
+        Reused: 0,
+        Updated: 0,
+        Removed: 0,
+      }
+    );
   }
 
   /** Open a printable browser view. Invoke from a user gesture to allow its window. */
@@ -469,7 +497,7 @@ export class RichTextBox extends HTMLElementBase {
     if (typeof this.toggleAttribute === "function")
       this.toggleAttribute(name, value);
   }
-  private emit(name: string, detail: unknown): void {
+  protected emit(name: string, detail: unknown): void {
     if (typeof CustomEvent !== "undefined")
       this.dispatchEvent(
         new CustomEvent(name, { detail, bubbles: true, composed: true }),
@@ -1036,8 +1064,435 @@ export class FlowDocumentScrollViewer extends FlowDocumentReader {
   }
 }
 export class FlowDocumentPageViewer extends FlowDocumentReader {
+  private _pageNumber = 1;
+  private _layout: PageLayoutResult | null = null;
+  private _settings: PageSettings = pageSettings({});
+  private _sheet: HTMLDivElement | null = null;
+  private _pageWindow: HTMLDivElement | null = null;
+  private _header: HTMLDivElement | null = null;
+  private _footer: HTMLDivElement | null = null;
+  private _footnotes: HTMLDivElement | null = null;
+  private _pageLabel: HTMLSpanElement | null = null;
+  private _previousButton: HTMLButtonElement | null = null;
+  private _nextButton: HTMLButtonElement | null = null;
+  private _layoutPending: Promise<PageLayoutResult> | null = null;
+  private _resizeObserver: ResizeObserver | null = null;
+  private _pageDisposed = false;
+  private _paginationDocument: DocumentNode | null = null;
+  private _elementsById = new Map<string, HTMLElement>();
+  private _pageNoteBlocks = new Map<number, DocumentNode[]>();
   constructor() {
     super("page");
+    if (!this._editor || !this._viewport || !this.shadowRoot) return;
+    const owner = this.ownerDocument;
+    const style = owner.createElement("style");
+    style.textContent = `.rt-page-sheet{position:relative;flex:none;box-sizing:border-box;margin:0 auto;background:var(--rt-paper);color:var(--rt-ink);border:1px solid var(--rt-border);box-shadow:0 2px 14px #17233a13;overflow:hidden}.rt-page-window{position:relative;overflow:hidden}.surface.rt-page-flow{box-sizing:content-box!important;min-height:0!important;margin:0!important;padding:0!important;border:0!important;box-shadow:none!important;zoom:1!important;overflow:visible!important;column-fill:auto;widows:2;orphans:2;outline:none!important}.surface.rt-page-flow p{widows:2;orphans:2}.surface.rt-page-flow tr{break-inside:avoid-column}.rt-page-nav{display:flex;align-items:center;justify-content:center;gap:16px;padding:10px;background:var(--rt-workspace);border-bottom:1px solid var(--rt-border);font:13px Segoe UI,system-ui,sans-serif}.rt-page-nav button{font:inherit;padding:5px 12px;border:1px solid var(--rt-border);border-radius:5px;background:var(--rt-paper);color:var(--rt-ink);cursor:pointer}.rt-page-nav button:disabled{opacity:.45;cursor:default}.rt-page-nav button:focus-visible{outline:2px solid var(--rt-accent)}.rt-page-story.surface{position:absolute;box-sizing:border-box;min-height:0!important;max-height:none;padding:0!important;margin:0!important;border:0!important;box-shadow:none!important;zoom:1!important;overflow:hidden;font-size:12px;line-height:1.4}.rt-page-story p{margin:0 0 .35em;min-height:0}.rt-page-notes{border-top:1px solid var(--rt-border)!important;padding-top:6px!important}.rt-page-story a{cursor:pointer}@media print{.rt-page-nav{display:none}.rt-page-sheet{width:auto!important;height:auto!important;overflow:visible;zoom:1!important;border:0;box-shadow:none}.rt-page-window{width:auto!important;height:auto!important;overflow:visible}.surface.rt-page-flow{height:auto!important;width:auto!important;column-width:auto!important;columns:auto!important;transform:none!important}.rt-page-story{display:none!important}}`;
+    this.shadowRoot.append(style);
+    const nav = owner.createElement("div");
+    nav.className = "rt-page-nav";
+    nav.setAttribute("part", "page-navigation");
+    nav.setAttribute("role", "navigation");
+    nav.setAttribute("aria-label", "Document pages");
+    this._previousButton = owner.createElement("button");
+    this._previousButton.type = "button";
+    this._previousButton.textContent = "Previous";
+    this._previousButton.setAttribute("aria-label", "Previous page");
+    this._previousButton.onclick = () => this.PreviousPage();
+    this._nextButton = owner.createElement("button");
+    this._nextButton.type = "button";
+    this._nextButton.textContent = "Next";
+    this._nextButton.setAttribute("aria-label", "Next page");
+    this._nextButton.onclick = () => this.NextPage();
+    this._pageLabel = owner.createElement("span");
+    this._pageLabel.setAttribute("aria-live", "polite");
+    nav.append(this._previousButton, this._pageLabel, this._nextButton);
+    this.shadowRoot.insertBefore(nav, this._viewport);
+    this._sheet = owner.createElement("div");
+    this._sheet.className = "rt-page-sheet";
+    this._sheet.setAttribute("part", "page");
+    this._pageWindow = owner.createElement("div");
+    this._pageWindow.className = "rt-page-window";
+    this._header = owner.createElement("div");
+    this._header.className = "surface rt-page-story";
+    this._header.setAttribute("part", "page-header");
+    this._footer = owner.createElement("div");
+    this._footer.className = "surface rt-page-story";
+    this._footer.setAttribute("part", "page-footer");
+    this._footnotes = owner.createElement("div");
+    this._footnotes.className = "surface rt-page-story rt-page-notes";
+    this._footnotes.setAttribute("part", "page-footnotes");
+    this._pageWindow.append(this._editor);
+    this._sheet.append(
+      this._header,
+      this._pageWindow,
+      this._footnotes,
+      this._footer,
+    );
+    this._viewport.append(this._sheet);
+    this._editor.addEventListener("load", () => this.queuePagination(), true);
+    this._editor.addEventListener("keydown", (event) => {
+      if (event.key === "PageDown" || event.key === "PageUp") {
+        event.preventDefault();
+        event.key === "PageDown" ? this.NextPage() : this.PreviousPage();
+      }
+    });
+  }
+  override connectedCallback(): void {
+    super.connectedCallback();
+    if (typeof ResizeObserver !== "undefined" && !this._resizeObserver) {
+      this._resizeObserver = new ResizeObserver(() => this.queuePagination());
+      this._resizeObserver.observe(this);
+    }
+    this.queuePagination();
+  }
+  override disconnectedCallback(): void {
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
+    super.disconnectedCallback();
+  }
+  override Refresh(): void {
+    super.Refresh();
+    this.configurePagination();
+    this.queuePagination();
+  }
+  override attributeChangedCallback(
+    name: string,
+    oldValue: string | null,
+    value: string | null,
+  ): void {
+    super.attributeChangedCallback(name, oldValue, value);
+    if (name === "zoom") this.configurePagination();
+  }
+  get PageCount(): number {
+    return this._layout?.PageCount || 1;
+  }
+  get PageNumber(): number {
+    return this._pageNumber;
+  }
+  set PageNumber(value: number) {
+    if (!Number.isInteger(value) || value < 1 || value > this.PageCount)
+      throw new RangeError("PageNumber is outside the measured page range.");
+    this.GoToPage(value);
+  }
+  get CanGoToNextPage(): boolean {
+    return this._pageNumber < this.PageCount;
+  }
+  get CanGoToPreviousPage(): boolean {
+    return this._pageNumber > 1;
+  }
+  get LayoutResult(): Readonly<PageLayoutResult> | null {
+    return this._layout;
+  }
+  NextPage(): boolean {
+    return this.GoToPage(this.PageNumber + 1);
+  }
+  PreviousPage(): boolean {
+    return this.GoToPage(this.PageNumber - 1);
+  }
+  FirstPage(): boolean {
+    return this.GoToPage(1);
+  }
+  LastPage(): boolean {
+    return this.GoToPage(this.PageCount);
+  }
+  GoToPage(number: number): boolean {
+    if (!Number.isInteger(number) || number < 1 || number > this.PageCount)
+      return false;
+    const changed = number !== this._pageNumber;
+    this._pageNumber = number;
+    this.updatePageView();
+    if (changed)
+      this.emit("pagechange", {
+        pageNumber: number,
+        pageCount: this.PageCount,
+        page: this._layout?.Pages[number - 1],
+      });
+    return true;
+  }
+  override Execute(command: string, parameter?: any): unknown {
+    switch (command.replace(/[\s_-]/g, "").toLowerCase()) {
+      case "nextpage":
+        return this.NextPage();
+      case "previouspage":
+        return this.PreviousPage();
+      case "firstpage":
+        return this.FirstPage();
+      case "lastpage":
+        return this.LastPage();
+      case "gotopage":
+        return this.GoToPage(Number(parameter));
+      default:
+        return super.Execute(command, parameter);
+    }
+  }
+  /** Wait for font layout and measure real column fragments in the screen viewer. */
+  Repaginate(): Promise<PageLayoutResult> {
+    if (this._layoutPending) return this._layoutPending;
+    if (
+      !this.isConnected ||
+      !this._editor ||
+      !this._render ||
+      !this.ownerDocument?.defaultView
+    )
+      return Promise.reject(
+        new Error("Screen pagination requires a connected browser document."),
+      );
+    this._layoutPending = (async () => {
+      await this.ownerDocument.fonts?.ready;
+      await new Promise<void>((resolve) =>
+        this.ownerDocument.defaultView!.requestAnimationFrame(() => resolve()),
+      );
+      if (this._pageDisposed) throw new Error("Page viewer is disposed.");
+      this.configurePagination();
+      if (!this.isConnected || this._editor!.getBoundingClientRect().width < 1)
+        throw new Error("Screen pagination requires a visible layout surface.");
+      this._layout = measurePageLayout(
+        this._editor!,
+        this._render!,
+        this.Document.ToJSON(),
+        this.Document.Revision,
+        this._settings,
+      );
+      this._pageNumber = Math.min(this._pageNumber, this._layout.PageCount);
+      this.indexPageNotes();
+      const currentPage = this._pageNumber;
+      const props = this._paginationDocument?.props || {};
+      if (
+        [
+          "Headers",
+          "Footers",
+          "FirstPageHeader",
+          "FirstPageFooter",
+          "EvenPageHeader",
+          "EvenPageFooter",
+          "Footnotes",
+        ].some((name) => Array.isArray(props[name]) && props[name].length)
+      ) {
+        for (let page = 1; page <= this.PageCount; page++) {
+          this._pageNumber = page;
+          this.renderStories();
+        }
+      }
+      this._pageNumber = currentPage;
+      this.updatePageView();
+      this.emit("paginated", { layout: this._layout });
+      return this._layout;
+    })().finally(() => {
+      this._layoutPending = null;
+    });
+    return this._layoutPending;
+  }
+  override Dispose(): void {
+    this._pageDisposed = true;
+    super.Dispose();
+  }
+  private queuePagination(): void {
+    if (
+      this._pageDisposed ||
+      !this.isConnected ||
+      !this._editor ||
+      !this._render
+    )
+      return;
+    void this.Repaginate().catch((error) => {
+      if (!this._pageDisposed) this.emit("paginationerror", { error });
+    });
+  }
+  private configurePagination(): void {
+    if (!this._editor || !this._sheet || !this._pageWindow) return;
+    const json = this.Document.ToJSON();
+    this._paginationDocument = json;
+    this._settings = pageSettings(json.props || {});
+    const s = this._settings,
+      paper = this._sheet.style,
+      flow = this._editor.style;
+    this._viewport?.classList.remove("continuous");
+    this._editor.classList.add("rt-page-flow");
+    paper.width = `${s.PageWidth}px`;
+    paper.height = `${s.PageHeight}px`;
+    paper.padding = `${s.Padding.Top}px ${s.Padding.Right}px ${s.Padding.Bottom}px ${s.Padding.Left}px`;
+    paper.zoom = String(this.Zoom);
+    this._pageWindow.style.width = `${s.ContentWidth}px`;
+    this._pageWindow.style.height = `${s.ContentHeight}px`;
+    flow.width = `${s.ContentWidth}px`;
+    flow.height = `${s.ContentHeight}px`;
+    flow.columnWidth = `${s.ContentWidth}px`;
+    flow.columnGap = `${s.ColumnGap}px`;
+    flow.columnCount = "auto";
+    flow.columnFill = "auto";
+    const model = new Map<string, DocumentNode>();
+    const visit = (node: DocumentNode) => {
+      model.set(node.id, node);
+      node.children?.forEach(visit);
+    };
+    visit(json);
+    this._elementsById = new Map();
+    this._editor
+      .querySelectorAll<HTMLElement>("[data-rt-id]")
+      .forEach((element) => {
+        this._elementsById.set(element.dataset.rtId!, element);
+        const props = model.get(element.dataset.rtId!)?.props || {};
+        if (props.BreakPageBefore) element.style.breakBefore = "column";
+        if (props.KeepTogether) element.style.breakInside = "avoid-column";
+        if (props.KeepWithNext) element.style.breakAfter = "avoid-column";
+      });
+    this.updatePageView();
+  }
+  private updatePageView(): void {
+    if (!this._editor || !this._sheet) return;
+    const s = this._settings;
+    const rtl =
+      this.ownerDocument.defaultView?.getComputedStyle(this._editor)
+        .direction === "rtl";
+    this._editor.style.transform = `translateX(${(rtl ? 1 : -1) * (this._pageNumber - 1) * (s.ContentWidth + s.ColumnGap)}px)`;
+    this._sheet.setAttribute(
+      "aria-label",
+      `Page ${this.PageNumber} of ${this.PageCount}`,
+    );
+    if (this._pageLabel)
+      this._pageLabel.textContent = `Page ${this.PageNumber} of ${this.PageCount}`;
+    if (this._previousButton)
+      this._previousButton.disabled = !this.CanGoToPreviousPage;
+    if (this._nextButton) this._nextButton.disabled = !this.CanGoToNextPage;
+    this.renderStories();
+  }
+  private renderStories(): void {
+    if (!this._header || !this._footer || !this._footnotes) return;
+    const props = this._paginationDocument?.props || {},
+      s = this._settings;
+    const variant = (kind: "Header" | "Footer") =>
+      this.PageNumber === 1 && Array.isArray(props[`FirstPage${kind}`])
+        ? props[`FirstPage${kind}`]
+        : this.PageNumber % 2 === 0 && Array.isArray(props[`EvenPage${kind}`])
+          ? props[`EvenPage${kind}`]
+          : props[`${kind}s`] || [];
+    const resolveFields = (node: DocumentNode): DocumentNode => {
+      const copy = {
+        ...node,
+        props: { ...node.props },
+        children: node.children?.map(resolveFields),
+      };
+      const field = node.props?.Field;
+      const type = String(field?.Type || field?.Instruction || "")
+        .split(/\s+/)[0]
+        .toUpperCase();
+      if (type === "PAGE" || type === "NUMPAGES")
+        copy.children = [
+          {
+            type: "Run",
+            id: `${node.id}-page-cache`,
+            props: {},
+            text: String(type === "PAGE" ? this.PageNumber : this.PageCount),
+          },
+        ];
+      return copy;
+    };
+    const renderStory = (
+      element: HTMLElement,
+      blocks: DocumentNode[],
+      kind: "header" | "footer" | "footnotes",
+    ) => {
+      const document: DocumentNode = {
+        type: "FlowDocument",
+        id: `page-${kind}`,
+        props: {},
+        children: blocks.map(resolveFields),
+      };
+      reconcileDocumentDOM(
+        element,
+        renderDocument(document, this.ownerDocument),
+      );
+      element.style.width = `${s.ContentWidth}px`;
+      element.style.left = `${s.Padding.Left}px`;
+      element.style.display = blocks.length ? "block" : "none";
+      if (kind === "header") {
+        element.style.top = "8px";
+        element.style.height = `${Math.max(0, s.Padding.Top - 16)}px`;
+      } else if (kind === "footer") {
+        element.style.bottom = "8px";
+        element.style.height = `${Math.max(0, s.Padding.Bottom - 16)}px`;
+      } else {
+        element.style.top = `${s.Padding.Top + s.ContentHeight}px`;
+        element.style.height = `${s.FootnoteHeight}px`;
+      }
+      if (this._layout)
+        this._layout.Overflows = this._layout.Overflows.filter(
+          (item) =>
+            !(item.PageNumber === this.PageNumber && item.Reason === kind),
+        );
+      if (
+        blocks.length &&
+        element.scrollHeight > element.clientHeight + 1 &&
+        this._layout
+      ) {
+        this._layout.Overflows.push({
+          ElementId: `page-${kind}`,
+          PageNumber: this.PageNumber,
+          Reason: kind,
+          Measured: element.scrollHeight,
+          Available: element.clientHeight,
+        });
+      }
+      if (this._layout)
+        this._layout.Pages[this.PageNumber - 1].HasOverflow =
+          this._layout.Overflows.some(
+            (item) => item.PageNumber === this.PageNumber,
+          );
+    };
+    renderStory(this._header, variant("Header"), "header");
+    renderStory(this._footer, variant("Footer"), "footer");
+    renderStory(
+      this._footnotes,
+      this._pageNoteBlocks.get(this.PageNumber) || [],
+      "footnotes",
+    );
+    if (
+      this._pageLabel &&
+      this._layout?.Pages[this.PageNumber - 1]?.HasOverflow
+    )
+      this._pageLabel.textContent += " · Content exceeds page";
+  }
+  private indexPageNotes(): void {
+    this._pageNoteBlocks = new Map();
+    if (!this._paginationDocument || !this._layout || !this._render) return;
+    const notes = new Map<string, DocumentNode[]>(
+      (this._paginationDocument.props.Footnotes || []).map((note: any) => [
+        String(note.Id),
+        note.Blocks || [],
+      ]),
+    );
+    if (!notes.size) return;
+    const added = new Map<number, Set<string>>();
+    const walk = (node: DocumentNode) => {
+      const reference = node.props?.NoteReference;
+      if (reference?.Kind === "Footnote" && notes.has(String(reference.Id))) {
+        const element = this._elementsById.get(node.id),
+          position = element && this._render!.positions.get(element);
+        if (position) {
+          const pages = this._layout!.Pages;
+          let low = 0,
+            high = pages.length - 1;
+          while (low < high) {
+            const mid = (low + high + 1) >>> 1;
+            if (pages[mid].StartOffset <= position.start) low = mid;
+            else high = mid - 1;
+          }
+          const page = low + 1,
+            id = String(reference.Id),
+            ids = added.get(page) || new Set<string>();
+          if (!ids.has(id)) {
+            ids.add(id);
+            added.set(page, ids);
+            this._pageNoteBlocks.set(page, [
+              ...(this._pageNoteBlocks.get(page) || []),
+              ...notes.get(id)!,
+            ]);
+          }
+        }
+      }
+      node.children?.forEach(walk);
+    };
+    walk(this._paginationDocument);
   }
 }
 
@@ -1051,6 +1506,7 @@ export function registerRichTextWeb(
     ["flow-document-reader", FlowDocumentReader],
     ["flow-document-scroll-viewer", FlowDocumentScrollViewer],
     ["flow-document-page-viewer", FlowDocumentPageViewer],
+    ["rich-text-toolbar", RichTextToolbar],
   ];
   for (const [name, constructor] of controls)
     if (!registry.get(name)) registry.define(name, constructor);
@@ -1062,5 +1518,6 @@ declare global {
     "flow-document-reader": FlowDocumentReader;
     "flow-document-scroll-viewer": FlowDocumentScrollViewer;
     "flow-document-page-viewer": FlowDocumentPageViewer;
+    "rich-text-toolbar": RichTextToolbar;
   }
 }

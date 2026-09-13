@@ -28,9 +28,9 @@
       "require": "./dist/cjs/core.js"
     },
     "./web": {
-      "types": "./dist/types/control.d.ts",
-      "import": "./dist/esm/control.js",
-      "require": "./dist/cjs/control.js"
+      "types": "./dist/types/web.d.ts",
+      "import": "./dist/esm/web.js",
+      "require": "./dist/cjs/web.js"
     },
     "./react": {
       "types": "./dist/types/react.d.ts",
@@ -52,7 +52,22 @@
       "import": "./dist/esm/bridge.js",
       "require": "./dist/cjs/bridge.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./pdf": {
+      "types": "./dist/types/pdf.d.ts",
+      "import": "./dist/esm/pdf.js",
+      "require": "./dist/cjs/pdf.js"
+    },
+    "./document": {
+      "types": "./dist/types/document-features.d.ts",
+      "import": "./dist/esm/document-features.js",
+      "require": "./dist/cjs/document-features.js"
+    },
+    "./collaboration": {
+      "types": "./dist/types/collaboration.d.ts",
+      "import": "./dist/esm/collaboration.js",
+      "require": "./dist/cjs/collaboration.js"
+    }
   },
   "files": [
     "dist",
@@ -72,7 +87,7 @@
     "./dist/cjs/index.js"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "keywords": [
     "rich-text",
@@ -106,7 +121,8 @@
     "@pdf-lib/fontkit": "1.1.1",
     "jszip": "3.10.1",
     "marked": "17.0.5",
-    "pdf-lib": "1.17.1"
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "6.3.289"
   },
   "peerDependencies": {
     "react": "^18.3.0 || ^19.0.0"

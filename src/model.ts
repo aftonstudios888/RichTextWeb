@@ -495,6 +495,10 @@ export class TextElement extends DependencyObject {
   /** Internal ownership slots; a node belongs to exactly one collection. */
   _collection: TextElementCollection<any> | null = null;
   protected childCollection?: TextElementCollection<any>;
+  /** @internal Shared collection access for structural engine patches. */
+  _getChildCollection(): TextElementCollection<any> | undefined {
+    return this.childCollection;
+  }
   constructor(type = "TextElement") {
     super();
     this.Type = type;
@@ -544,18 +548,29 @@ export class TextElement extends DependencyObject {
   get Children(): readonly TextElement[] {
     return this.childCollection?.ToArray() ?? [];
   }
-  get ContentStart(): TextPointer {
+  private boundaryPointer(
+    edge: keyof TextElementSymbolBounds,
+    direction: LogicalDirectionValue,
+  ): TextPointer {
     const document = this.Document;
     if (!document)
       throw new Error("The element is not attached to a FlowDocument.");
-    return new TextPointer(document, elementOffset(document, this));
+    const bounds = document.GetSymbolMap().GetElementBounds(this);
+    if (!bounds)
+      throw new Error("This element is not part of the text symbol stream.");
+    return TextPointer._fromElementBoundary(document, this.Id, edge, direction);
+  }
+  get ContentStart(): TextPointer {
+    return this.boundaryPointer("ContentStart", LogicalDirection.Backward);
   }
   get ContentEnd(): TextPointer {
-    const start = this.ContentStart;
-    return new TextPointer(
-      start.Document,
-      Math.min(start.Document.Text.length, start.Offset + this.Text.length),
-    );
+    return this.boundaryPointer("ContentEnd", LogicalDirection.Forward);
+  }
+  get ElementStart(): TextPointer {
+    return this.boundaryPointer("ElementStart", LogicalDirection.Forward);
+  }
+  get ElementEnd(): TextPointer {
+    return this.boundaryPointer("ElementEnd", LogicalDirection.Backward);
   }
   ToJSON(): DocumentNode {
     const result: DocumentNode = {
@@ -1403,6 +1418,94 @@ export class FlowDocument extends TextElement {
   private changeDepth = 0;
   private pending: DocumentChange[] = [];
   private dispatching = false;
+  private symbolMap: TextSymbolMap | undefined;
+  private pointerDirty = true;
+  private synchronizingPointers = false;
+  private pointers = new Set<WeakRef<TextPointer>>();
+  private pendingTextChanges: TextChangeSpan[] | undefined;
+  /** Exact pre-batch UTF-16 edits. Ranges are sorted, disjoint and expressed in the original document. */
+  SetPendingTextChanges(changes: readonly TextChangeSpan[]): void {
+    const length = this.GetSymbolMap().Text.length;
+    let previousEnd = -1,
+      previousStart = -1;
+    this.pendingTextChanges = changes.map((change) => {
+      const { Start, RemovedLength, InsertedLength } = change;
+      if (
+        ![Start, RemovedLength, InsertedLength].every(
+          (value) => Number.isSafeInteger(value) && value >= 0,
+        ) ||
+        Start < previousEnd ||
+        Start === previousStart ||
+        Start + RemovedLength > length
+      )
+        throw new RangeError(
+          "Text change ranges must be sorted, nonoverlapping and inside the pre-edit document.",
+        );
+      previousEnd = Start + RemovedLength;
+      previousStart = Start;
+      return { Start, RemovedLength, InsertedLength };
+    });
+  }
+  GetSymbolMap(): TextSymbolMap {
+    this._syncPointers();
+    return this.symbolMap!;
+  }
+  get SymbolCount(): number {
+    return this.GetSymbolMap().SymbolCount;
+  }
+  GetPositionAtSymbolOffset(
+    offset: number,
+    direction: LogicalDirectionValue = LogicalDirection.Forward,
+  ): TextPointer | null {
+    const map = this.GetSymbolMap();
+    if (!Number.isInteger(offset))
+      throw new RangeError("Symbol offset must be an integer.");
+    return offset < 0 || offset > map.SymbolCount
+      ? null
+      : TextPointer.FromSymbolOffset(this, offset, direction);
+  }
+  /** @internal */ _trackPointer(pointer: TextPointer): WeakRef<TextPointer> {
+    const reference = new WeakRef(pointer);
+    this.pointers.add(reference);
+    return reference;
+  }
+  /** @internal */ _untrackPointer(reference: WeakRef<TextPointer>): void {
+    this.pointers.delete(reference);
+  }
+  /** @internal */ _syncPointers(): void {
+    if (this.synchronizingPointers || (!this.pointerDirty && this.symbolMap))
+      return;
+    this.synchronizingPointers = true;
+    try {
+      const previous = this.symbolMap;
+      const next = new TextSymbolMap(this);
+      this.symbolMap = next;
+      this.pointerDirty = false;
+      const explicit = this.pendingTextChanges;
+      this.pendingTextChanges = undefined;
+      const edits =
+        previous &&
+        explicit &&
+        previous.Text.length +
+          explicit.reduce(
+            (total, edit) => total + edit.InsertedLength - edit.RemovedLength,
+            0,
+          ) ===
+          next.Text.length
+          ? explicit
+          : undefined;
+      for (const reference of this.pointers) {
+        const pointer = reference.deref();
+        if (!pointer) {
+          this.pointers.delete(reference);
+          continue;
+        }
+        if (previous) pointer._rebase(previous, next, edits);
+      }
+    } finally {
+      this.synchronizingPointers = false;
+    }
+  }
   private elementIds = new Map<string, TextElement>([[this.Id, this]]);
   /** @internal */ _hasElementId(id: string): boolean {
     return this.elementIds.has(id);
@@ -1436,10 +1539,14 @@ export class FlowDocument extends TextElement {
     return this.changeDepth > 0;
   }
   override get ContentStart(): TextPointer {
-    return new TextPointer(this, 0);
+    return TextPointer.FromSymbolOffset(this, 0, LogicalDirection.Backward);
   }
   override get ContentEnd(): TextPointer {
-    return new TextPointer(this, this.Text.length);
+    return TextPointer.FromSymbolOffset(
+      this,
+      this.SymbolCount,
+      LogicalDirection.Forward,
+    );
   }
   get PageWidth(): number {
     return this.GetValue("PageWidth");
@@ -1506,6 +1613,7 @@ export class FlowDocument extends TextElement {
     }
   }
   /** @internal */ _record(change: DocumentChange): void {
+    if (change.Kind !== "property") this.pointerDirty = true;
     this.pending.push(change);
     if (!this.changeDepth) this.flush();
   }
@@ -1514,6 +1622,7 @@ export class FlowDocument extends TextElement {
     this.dispatching = true;
     try {
       while (this.pending.length && this.changeDepth === 0) {
+        if (this.symbolMap || this.pointers.size) this._syncPointers();
         const changes = this.pending;
         this.pending = [];
         this.revision++;
@@ -1651,27 +1760,629 @@ function isAncestor(ancestor: TextElement, descendant: TextElement): boolean {
   return false;
 }
 
-/** Immutable plain-text position; construct fresh positions after document edits. */
+/** Context categories use WPF names; offsets remain explicitly separated from UTF-16 positions. */
+export const TextPointerContext = {
+  None: "None",
+  Text: "Text",
+  EmbeddedElement: "EmbeddedElement",
+  ElementStart: "ElementStart",
+  ElementEnd: "ElementEnd",
+} as const;
+export type TextPointerContextValue =
+  (typeof TextPointerContext)[keyof typeof TextPointerContext];
+export interface TextChangeSpan {
+  Start: number;
+  RemovedLength: number;
+  InsertedLength: number;
+}
+export interface TextElementSymbolBounds {
+  ElementStart: number;
+  ContentStart: number;
+  ContentEnd: number;
+  ElementEnd: number;
+}
+export interface TextSymbolSegment {
+  readonly Context: Exclude<TextPointerContextValue, "None">;
+  readonly SymbolStart: number;
+  readonly SymbolEnd: number;
+  readonly TextStart: number;
+  readonly TextEnd: number;
+  readonly Element: TextElement;
+  readonly Text: string;
+}
+interface SymbolElementRecord {
+  element: TextElement;
+  bounds: TextElementSymbolBounds;
+  depth: number;
+}
+function validateDirection(direction: LogicalDirectionValue): void {
+  if (
+    direction !== LogicalDirection.Forward &&
+    direction !== LogicalDirection.Backward
+  )
+    throw new RangeError("Logical direction must be Forward or Backward.");
+}
+
+/** Immutable structural index: tags count once, Run code units count once, embedded objects count once. */
+export class TextSymbolMap {
+  readonly Text: string;
+  readonly SymbolCount: number;
+  readonly Segments: readonly TextSymbolSegment[];
+  private records = new Map<string, SymbolElementRecord>();
+  private runs = new Map<string, TextSymbolSegment>();
+  private graphemes?: number[];
+  /** @internal */ _getGraphemeOffsets(): readonly number[] {
+    return (this.graphemes ??= graphemeBoundaries(this.Text));
+  }
+  constructor(readonly Document: FlowDocument) {
+    this.Text = Document.Text;
+    const segments: TextSymbolSegment[] = [];
+    let symbol = 0,
+      text = 0,
+      leafIndex = 0;
+    const add = (
+      context: TextSymbolSegment["Context"],
+      element: TextElement,
+      symbolLength = 1,
+      textLength = 0,
+      content = "",
+    ) => {
+      const segment = Object.freeze({
+        Context: context,
+        SymbolStart: symbol,
+        SymbolEnd: symbol + symbolLength,
+        TextStart: text,
+        TextEnd: text + textLength,
+        Element: element,
+        Text: content,
+      });
+      if (symbolLength > 0) segments.push(segment);
+      if (context === TextPointerContext.Text)
+        this.runs.set(element.Id, segment);
+      symbol += symbolLength;
+      text += textLength;
+    };
+    const visit = (element: TextElement, depth: number): void => {
+      if (element instanceof TableColumn) return;
+      if (element instanceof Image) {
+        const start = symbol;
+        add(TextPointerContext.EmbeddedElement, element, 1, 1);
+        this.records.set(element.Id, {
+          element,
+          depth,
+          bounds: Object.freeze({
+            ElementStart: start,
+            ContentStart: start,
+            ContentEnd: symbol,
+            ElementEnd: symbol,
+          }),
+        });
+        return;
+      }
+      const start = symbol;
+      const delimiter =
+        element instanceof Paragraph || element instanceof BlockUIContainer
+          ? leafIndex++ > 0
+            ? 1
+            : 0
+          : 0;
+      add(TextPointerContext.ElementStart, element, 1, delimiter);
+      const contentStart = symbol;
+      if (element instanceof Run)
+        add(
+          TextPointerContext.Text,
+          element,
+          element.Text.length,
+          element.Text.length,
+          element.Text,
+        );
+      else if (
+        element instanceof InlineUIContainer ||
+        element instanceof BlockUIContainer
+      ) {
+        // Portable UI containers retain one replacement character even when no child is installed.
+        if (element.Child) {
+          const embeddedStart = symbol;
+          add(TextPointerContext.EmbeddedElement, element.Child, 1, 1);
+          this.records.set(element.Child.Id, {
+            element: element.Child,
+            depth: depth + 1,
+            bounds: Object.freeze({
+              ElementStart: embeddedStart,
+              ContentStart: embeddedStart,
+              ContentEnd: symbol,
+              ElementEnd: symbol,
+            }),
+          });
+        }
+      } else if (!(element instanceof LineBreak))
+        for (const child of element.Children) visit(child, depth + 1);
+      const contentEnd = symbol;
+      let plainOnEnd =
+        element instanceof LineBreak ||
+        ((element instanceof InlineUIContainer ||
+          element instanceof BlockUIContainer) &&
+          !element.Child)
+          ? 1
+          : 0;
+      add(TextPointerContext.ElementEnd, element, 1, plainOnEnd);
+      this.records.set(element.Id, {
+        element,
+        depth,
+        bounds: Object.freeze({
+          ElementStart: start,
+          ContentStart: contentStart,
+          ContentEnd: contentEnd,
+          ElementEnd: symbol,
+        }),
+      });
+    };
+    for (const block of Document.Blocks) visit(block, 1);
+    this.SymbolCount = symbol;
+    this.Segments = Object.freeze(segments);
+    this.records.set(Document.Id, {
+      element: Document,
+      depth: 0,
+      bounds: Object.freeze({
+        ElementStart: 0,
+        ContentStart: 0,
+        ContentEnd: symbol,
+        ElementEnd: symbol,
+      }),
+    });
+  }
+  GetElementBounds(
+    element: TextElement | string,
+  ): Readonly<TextElementSymbolBounds> | null {
+    return (
+      this.records.get(typeof element === "string" ? element : element.Id)
+        ?.bounds ?? null
+    );
+  }
+  GetTextOffset(symbolOffset: number): number {
+    this.validateSymbolOffset(symbolOffset);
+    if (symbolOffset === this.SymbolCount) return this.Text.length;
+    const segment = this.GetAdjacentSegment(
+      symbolOffset,
+      LogicalDirection.Forward,
+    );
+    if (!segment) return 0;
+    return segment.Context === TextPointerContext.Text
+      ? segment.TextStart + symbolOffset - segment.SymbolStart
+      : segment.TextStart;
+  }
+  GetSymbolOffset(
+    textOffset: number,
+    direction: LogicalDirectionValue = LogicalDirection.Forward,
+  ): number {
+    validateDirection(direction);
+    if (
+      !Number.isInteger(textOffset) ||
+      textOffset < 0 ||
+      textOffset > this.Text.length
+    )
+      throw new RangeError("Text offset is outside the document.");
+    // Prefer the adjacent text run so ordinary UTF-16 positions remain useful editing positions.
+    for (const segment of this.runs.values()) {
+      if (
+        direction === LogicalDirection.Forward
+          ? textOffset >= segment.TextStart && textOffset < segment.TextEnd
+          : textOffset > segment.TextStart && textOffset <= segment.TextEnd
+      )
+        return segment.SymbolStart + textOffset - segment.TextStart;
+    }
+    for (const segment of this.runs.values()) {
+      if (textOffset === segment.TextEnd) return segment.SymbolEnd;
+      if (textOffset === segment.TextStart) return segment.SymbolStart;
+    }
+    for (const record of this.records.values()) {
+      if (
+        record.element instanceof Paragraph &&
+        record.element.Text.length === 0 &&
+        this.GetTextOffset(record.bounds.ContentStart) === textOffset
+      )
+        return record.bounds.ContentStart;
+    }
+    let first: number | undefined, last: number | undefined;
+    for (const segment of this.Segments) {
+      if (segment.TextStart === textOffset) {
+        first ??= segment.SymbolStart;
+        last = segment.SymbolStart;
+      }
+      if (segment.TextEnd === textOffset) {
+        first ??= segment.SymbolEnd;
+        last = segment.SymbolEnd;
+      }
+      // A synthetic paragraph separator can share a structural edge with a line break.
+      if (segment.TextStart < textOffset && segment.TextEnd > textOffset)
+        return direction === LogicalDirection.Forward
+          ? segment.SymbolEnd
+          : segment.SymbolStart;
+    }
+    if (textOffset === this.Text.length) last = this.SymbolCount;
+    return (
+      (direction === LogicalDirection.Forward
+        ? (last ?? first)
+        : (first ?? last)) ?? 0
+    );
+  }
+  GetAdjacentSegment(
+    symbolOffset: number,
+    direction: LogicalDirectionValue,
+  ): TextSymbolSegment | null {
+    this.validateSymbolOffset(symbolOffset);
+    validateDirection(direction);
+    const probe =
+      direction === LogicalDirection.Forward ? symbolOffset : symbolOffset - 1;
+    if (probe < 0 || probe >= this.SymbolCount) return null;
+    let low = 0,
+      high = this.Segments.length - 1;
+    while (low <= high) {
+      const middle = (low + high) >>> 1;
+      const segment = this.Segments[middle]!;
+      if (probe < segment.SymbolStart) high = middle - 1;
+      else if (probe >= segment.SymbolEnd) low = middle + 1;
+      else return segment;
+    }
+    return null;
+  }
+  GetParent(symbolOffset: number): TextElement {
+    this.validateSymbolOffset(symbolOffset);
+    let best = this.records.get(this.Document.Id)!;
+    for (const record of this.records.values())
+      if (
+        !(record.element instanceof Image) &&
+        record.depth > best.depth &&
+        symbolOffset >= record.bounds.ContentStart &&
+        symbolOffset <= record.bounds.ContentEnd
+      )
+        best = record;
+    return best.element;
+  }
+  GetParagraph(symbolOffset: number): Paragraph | null {
+    this.validateSymbolOffset(symbolOffset);
+    let paragraph: SymbolElementRecord | undefined;
+    for (const record of this.records.values())
+      if (
+        record.element instanceof Paragraph &&
+        symbolOffset >= record.bounds.ContentStart &&
+        symbolOffset <= record.bounds.ContentEnd &&
+        (!paragraph || record.depth > paragraph.depth)
+      )
+        paragraph = record;
+    return (paragraph?.element as Paragraph | undefined) ?? null;
+  }
+  /** @internal */ _getRun(id: string): TextSymbolSegment | undefined {
+    return this.runs.get(id);
+  }
+  /** @internal */ _validate(offset: number): void {
+    this.validateSymbolOffset(offset);
+  }
+  private validateSymbolOffset(offset: number): void {
+    if (!Number.isInteger(offset) || offset < 0 || offset > this.SymbolCount)
+      throw new RangeError("Symbol offset is outside the document.");
+  }
+}
+
+function inferredChange(
+  before: string,
+  after: string,
+): TextChangeSpan | undefined {
+  if (before === after) return undefined;
+  let start = 0;
+  while (
+    start < before.length &&
+    start < after.length &&
+    before[start] === after[start]
+  )
+    start++;
+  let endBefore = before.length,
+    endAfter = after.length;
+  while (
+    endBefore > start &&
+    endAfter > start &&
+    before[endBefore - 1] === after[endAfter - 1]
+  ) {
+    endBefore--;
+    endAfter--;
+  }
+  return {
+    Start: start,
+    RemovedLength: endBefore - start,
+    InsertedLength: endAfter - start,
+  };
+}
+function mapTextPosition(
+  offset: number,
+  direction: LogicalDirectionValue,
+  changes: readonly TextChangeSpan[],
+): number {
+  let adjustment = 0;
+  for (const change of changes) {
+    const end = change.Start + change.RemovedLength;
+    if (offset < change.Start) break;
+    if (offset > end || (offset === end && change.RemovedLength > 0)) {
+      adjustment += change.InsertedLength - change.RemovedLength;
+      continue;
+    }
+    return (
+      change.Start +
+      adjustment +
+      (direction === LogicalDirection.Forward ? change.InsertedLength : 0)
+    );
+  }
+  return offset + adjustment;
+}
+function graphemeBoundaries(text: string): number[] {
+  if (typeof Intl.Segmenter === "function")
+    return [
+      ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
+        text,
+      ),
+    ]
+      .map((segment) => segment.index)
+      .concat(text.length);
+  const result = [0];
+  let offset = 0;
+  for (const character of text) {
+    offset += character.length;
+    result.push(offset);
+  }
+  return result;
+}
+export interface TextPointerOptions {
+  TrackChanges?: boolean;
+}
+
+/** Live UTF-16 position with a separate WPF-style structural symbol coordinate. */
 export class TextPointer {
   readonly Document: FlowDocument;
-  readonly Offset: number;
   readonly LogicalDirection: LogicalDirectionValue;
+  private offset: number;
+  private symbolOffset: number;
+  private snapshotMap: TextSymbolMap;
+  private registration?: WeakRef<TextPointer>;
+  private edge?: { id: string; edge: keyof TextElementSymbolBounds };
   constructor(
     document: FlowDocument,
     offset = 0,
     direction: LogicalDirectionValue = LogicalDirection.Forward,
+    options: TextPointerOptions = {},
   ) {
     if (!(document instanceof FlowDocument))
       throw new TypeError("A TextPointer requires a FlowDocument.");
-    if (
-      !Number.isInteger(offset) ||
-      offset < 0 ||
-      offset > document.Text.length
-    )
+    validateDirection(direction);
+    const map = document.GetSymbolMap();
+    if (!Number.isInteger(offset) || offset < 0 || offset > map.Text.length)
       throw new RangeError("TextPointer offset is outside the document.");
     this.Document = document;
-    this.Offset = offset;
+    this.offset = offset;
     this.LogicalDirection = direction;
+    this.snapshotMap = map;
+    this.symbolOffset = map.GetSymbolOffset(offset, direction);
+    if (options.TrackChanges !== false)
+      this.registration = document._trackPointer(this);
+  }
+  static FromSymbolOffset(
+    document: FlowDocument,
+    symbolOffset: number,
+    direction: LogicalDirectionValue = LogicalDirection.Forward,
+    options: TextPointerOptions = {},
+  ): TextPointer {
+    const map = document.GetSymbolMap();
+    map._validate(symbolOffset);
+    const pointer = new TextPointer(
+      document,
+      map.GetTextOffset(symbolOffset),
+      direction,
+      options,
+    );
+    pointer.symbolOffset = symbolOffset;
+    return pointer;
+  }
+  /** @internal */ static _fromElementBoundary(
+    document: FlowDocument,
+    id: string,
+    edge: keyof TextElementSymbolBounds,
+    direction: LogicalDirectionValue,
+  ): TextPointer {
+    const bounds = document.GetSymbolMap().GetElementBounds(id);
+    if (!bounds) throw new Error("Element is outside the text stream.");
+    const pointer = TextPointer.FromSymbolOffset(
+      document,
+      bounds[edge],
+      direction,
+    );
+    pointer.edge = { id, edge };
+    const element = document.FindById(id)!;
+    pointer.offset =
+      elementOffset(document, element) +
+      (edge === "ContentEnd" || edge === "ElementEnd"
+        ? element.Text.length
+        : 0);
+    return pointer;
+  }
+  get Offset(): number {
+    this.synchronize();
+    return this.offset;
+  }
+  get SymbolOffset(): number {
+    this.synchronize();
+    return this.symbolOffset;
+  }
+  get IsLive(): boolean {
+    return !!this.registration;
+  }
+  get DocumentStart(): TextPointer {
+    return this.deriveAtSymbol(0, LogicalDirection.Backward);
+  }
+  get DocumentEnd(): TextPointer {
+    return this.deriveAtSymbol(this.map.SymbolCount, LogicalDirection.Forward);
+  }
+  get Parent(): TextElement {
+    return this.map.GetParent(this.symbolOffset);
+  }
+  get Paragraph(): Paragraph | null {
+    return this.map.GetParagraph(this.symbolOffset);
+  }
+  private deriveAtSymbol(
+    symbolOffset: number,
+    direction: LogicalDirectionValue,
+  ): TextPointer {
+    const map = this.map;
+    map._validate(symbolOffset);
+    validateDirection(direction);
+    if (this.IsLive)
+      return TextPointer.FromSymbolOffset(
+        this.Document,
+        symbolOffset,
+        direction,
+      );
+    const pointer = Object.create(TextPointer.prototype) as TextPointer;
+    Object.assign(pointer, {
+      Document: this.Document,
+      LogicalDirection: direction,
+      offset: map.GetTextOffset(symbolOffset),
+      symbolOffset,
+      snapshotMap: map,
+    });
+    return pointer;
+  }
+  private deriveAtText(
+    offset: number,
+    direction: LogicalDirectionValue,
+  ): TextPointer {
+    const pointer = this.deriveAtSymbol(
+      this.map.GetSymbolOffset(offset, direction),
+      direction,
+    );
+    pointer.offset = offset;
+    return pointer;
+  }
+  private get map(): TextSymbolMap {
+    this.synchronize();
+    return this.snapshotMap;
+  }
+  private synchronize(): void {
+    if (this.registration) this.Document._syncPointers();
+  }
+  /** Stops tracking subsequent edits while retaining the current coordinates and structural snapshot. */
+  Dispose(): void {
+    this.synchronize();
+    if (this.registration) {
+      this.Document._untrackPointer(this.registration);
+      this.registration = undefined;
+    }
+  }
+  CreateSnapshot(): TextPointer {
+    this.synchronize();
+    const pointer = Object.create(TextPointer.prototype) as TextPointer;
+    Object.assign(pointer, {
+      Document: this.Document,
+      LogicalDirection: this.LogicalDirection,
+      offset: this.offset,
+      symbolOffset: this.symbolOffset,
+      snapshotMap: this.snapshotMap,
+    });
+    return pointer;
+  }
+  /** @internal */ _rebase(
+    previous: TextSymbolMap,
+    next: TextSymbolMap,
+    changes?: readonly TextChangeSpan[],
+  ): void {
+    if (this.edge) {
+      const bounds = next.GetElementBounds(this.edge.id);
+      if (bounds) {
+        this.symbolOffset = bounds[this.edge.edge];
+        const element = next.Document.FindById(this.edge.id)!;
+        this.offset =
+          elementOffset(next.Document, element) +
+          (this.edge.edge === "ContentEnd" || this.edge.edge === "ElementEnd"
+            ? element.Text.length
+            : 0);
+        this.snapshotMap = next;
+        return;
+      }
+      this.edge = undefined;
+    }
+    let nextOffset: number | undefined;
+    if (changes)
+      nextOffset = mapTextPosition(this.offset, this.LogicalDirection, changes);
+    else {
+      const forward = previous.GetAdjacentSegment(
+        this.symbolOffset,
+        LogicalDirection.Forward,
+      );
+      const backward = previous.GetAdjacentSegment(
+        this.symbolOffset,
+        LogicalDirection.Backward,
+      );
+      const candidate =
+        this.LogicalDirection === LogicalDirection.Forward
+          ? forward?.Context === TextPointerContext.Text
+            ? forward
+            : backward
+          : backward?.Context === TextPointerContext.Text
+            ? backward
+            : forward;
+      if (candidate?.Context === TextPointerContext.Text) {
+        const run = next._getRun(candidate.Element.Id);
+        if (run) {
+          const local = this.symbolOffset - candidate.SymbolStart;
+          const change = inferredChange(candidate.Text, run.Text);
+          if (previous.Text === next.Text && change) nextOffset = this.offset;
+          else
+            nextOffset =
+              run.TextStart +
+              mapTextPosition(
+                local,
+                this.LogicalDirection,
+                change ? [change] : [],
+              );
+        }
+      }
+      if (nextOffset === undefined && previous.Text === next.Text) {
+        const adjacent =
+          this.LogicalDirection === LogicalDirection.Forward
+            ? forward
+            : backward;
+        const bounds = adjacent && next.GetElementBounds(adjacent.Element.Id);
+        if (
+          bounds &&
+          adjacent &&
+          adjacent.Context !== TextPointerContext.Text
+        ) {
+          const edge =
+            adjacent.Context === TextPointerContext.ElementStart
+              ? "ElementStart"
+              : adjacent.Context === TextPointerContext.ElementEnd
+                ? "ContentEnd"
+                : "ElementStart";
+          this.symbolOffset =
+            bounds[edge] +
+            (this.LogicalDirection === LogicalDirection.Backward ? 1 : 0);
+          this.symbolOffset = Math.min(next.SymbolCount, this.symbolOffset);
+          this.offset = next.GetTextOffset(this.symbolOffset);
+          this.snapshotMap = next;
+          return;
+        }
+      }
+      if (nextOffset === undefined) {
+        const change = inferredChange(previous.Text, next.Text);
+        nextOffset = mapTextPosition(
+          this.offset,
+          this.LogicalDirection,
+          change ? [change] : [],
+        );
+      }
+    }
+    this.offset = Math.max(0, Math.min(next.Text.length, nextOffset));
+    this.symbolOffset = next.GetSymbolOffset(
+      this.offset,
+      this.LogicalDirection,
+    );
+    this.snapshotMap = next;
   }
   GetPositionAtOffset(
     offset: number,
@@ -1679,50 +2390,233 @@ export class TextPointer {
   ): TextPointer | null {
     if (!Number.isInteger(offset))
       throw new RangeError("Offset must be an integer.");
+    validateDirection(direction);
     const next = this.Offset + offset;
-    return next < 0 || next > this.Document.Text.length
+    return next < 0 || next > this.map.Text.length
       ? null
-      : new TextPointer(this.Document, next, direction);
+      : this.deriveAtText(next, direction);
+  }
+  GetPositionAtSymbolOffset(
+    offset: number,
+    direction: LogicalDirectionValue = this.LogicalDirection,
+  ): TextPointer | null {
+    if (!Number.isInteger(offset))
+      throw new RangeError("Symbol offset must be an integer.");
+    const next = this.SymbolOffset + offset;
+    return next < 0 || next > this.map.SymbolCount
+      ? null
+      : this.deriveAtSymbol(next, direction);
   }
   CompareTo(other: TextPointer): number {
     this.ensureDocument(other);
     return Math.sign(this.Offset - other.Offset);
   }
+  CompareSymbolTo(other: TextPointer): number {
+    this.ensureDocument(other);
+    return Math.sign(this.SymbolOffset - other.SymbolOffset);
+  }
   GetOffsetToPosition(other: TextPointer): number {
     this.ensureDocument(other);
     return other.Offset - this.Offset;
   }
-  get IsAtInsertionPosition(): boolean {
-    const text = this.Document.Text;
+  GetSymbolOffsetToPosition(other: TextPointer): number {
+    this.ensureDocument(other);
+    return other.SymbolOffset - this.SymbolOffset;
+  }
+  IsInSameDocument(other: TextPointer): boolean {
+    return other instanceof TextPointer && other.Document === this.Document;
+  }
+  GetPointerContext(direction: LogicalDirectionValue): TextPointerContextValue {
     return (
-      this.Offset <= text.length &&
-      !(
-        this.Offset > 0 &&
-        this.Offset < text.length &&
-        /[\uD800-\uDBFF]/.test(text[this.Offset - 1]!) &&
-        /[\uDC00-\uDFFF]/.test(text[this.Offset]!)
-      )
+      this.map.GetAdjacentSegment(this.symbolOffset, direction)?.Context ??
+      TextPointerContext.None
+    );
+  }
+  GetAdjacentElement(direction: LogicalDirectionValue): TextElement | null {
+    const segment = this.map.GetAdjacentSegment(this.symbolOffset, direction);
+    return segment && segment.Context !== TextPointerContext.Text
+      ? segment.Element
+      : null;
+  }
+  GetNextContextPosition(direction: LogicalDirectionValue): TextPointer | null {
+    const map = this.map,
+      segment = map.GetAdjacentSegment(this.symbolOffset, direction);
+    return segment
+      ? this.deriveAtSymbol(
+          direction === LogicalDirection.Forward
+            ? segment.SymbolEnd
+            : segment.SymbolStart,
+          this.LogicalDirection,
+        )
+      : null;
+  }
+  GetTextInRun(direction: LogicalDirectionValue): string;
+  GetTextInRun(
+    direction: LogicalDirectionValue,
+    buffer: string[] | Uint16Array,
+    startIndex: number,
+    count: number,
+  ): number;
+  GetTextInRun(
+    direction: LogicalDirectionValue,
+    buffer?: string[] | Uint16Array,
+    startIndex = 0,
+    count = 0,
+  ): string | number {
+    const segment = this.map.GetAdjacentSegment(this.symbolOffset, direction);
+    const text =
+      !segment || segment.Context !== TextPointerContext.Text
+        ? ""
+        : direction === LogicalDirection.Forward
+          ? segment.Text.slice(this.symbolOffset - segment.SymbolStart)
+          : segment.Text.slice(0, this.symbolOffset - segment.SymbolStart);
+    if (buffer === undefined) return text;
+    if (
+      !(Array.isArray(buffer) || buffer instanceof Uint16Array) ||
+      !Number.isSafeInteger(startIndex) ||
+      !Number.isSafeInteger(count) ||
+      startIndex < 0 ||
+      count < 0 ||
+      startIndex + count > buffer.length
+    )
+      throw new RangeError("Text buffer range is invalid.");
+    const copied = Math.min(count, text.length),
+      value =
+        direction === LogicalDirection.Forward
+          ? text.slice(0, copied)
+          : text.slice(text.length - copied);
+    for (let index = 0; index < copied; index++)
+      if (buffer instanceof Uint16Array)
+        buffer[startIndex + index] = value.charCodeAt(index);
+      else buffer[startIndex + index] = value[index]!;
+    return copied;
+  }
+  GetTextRunLength(direction: LogicalDirectionValue): number {
+    return this.GetTextInRun(direction).length;
+  }
+  GetPropertyValue<T = any>(property: string | DependencyProperty<T>): T {
+    return this.Parent.GetValue(property);
+  }
+  get IsAtInsertionPosition(): boolean {
+    const map = this.map;
+    const parent = map.GetParent(this.symbolOffset);
+    return (
+      (parent instanceof Paragraph ||
+        parent instanceof Span ||
+        parent instanceof Run) &&
+      map._getGraphemeOffsets().includes(this.offset)
     );
   }
   GetInsertionPosition(direction: LogicalDirectionValue): TextPointer | null {
+    validateDirection(direction);
     if (this.IsAtInsertionPosition)
-      return new TextPointer(this.Document, this.Offset, direction);
-    return this.GetPositionAtOffset(
-      direction === LogicalDirection.Forward ? 1 : -1,
-      direction,
-    );
+      return this.deriveAtSymbol(this.SymbolOffset, direction);
+    const step = direction === LogicalDirection.Forward ? 1 : -1;
+    for (
+      let symbol = this.SymbolOffset;
+      symbol >= 0 && symbol <= this.map.SymbolCount;
+      symbol += step
+    ) {
+      const position = this.deriveAtSymbol(symbol, direction);
+      if (position.IsAtInsertionPosition) return position;
+      position.Dispose();
+    }
+    return null;
   }
   GetNextInsertionPosition(
     direction: LogicalDirectionValue,
   ): TextPointer | null {
-    const next = this.GetPositionAtOffset(
-      direction === LogicalDirection.Forward ? 1 : -1,
-      direction,
+    validateDirection(direction);
+    const offsets = this.map._getGraphemeOffsets();
+    const next =
+      direction === LogicalDirection.Forward
+        ? offsets.find((offset) => offset > this.offset)
+        : [...offsets].reverse().find((offset) => offset < this.offset);
+    if (next === undefined) return null;
+    const pointer = this.deriveAtText(next, direction);
+    if (pointer.IsAtInsertionPosition) return pointer;
+    const position = pointer.GetInsertionPosition(direction);
+    pointer.Dispose();
+    return position;
+  }
+  InsertTextInRun(text: string): void {
+    if (typeof text !== "string") throw new TypeError("Text must be a string.");
+    if (!this.IsLive)
+      throw new Error("Snapshot pointers cannot edit a document.");
+    const map = this.map;
+    const parent = map.GetParent(this.symbolOffset);
+    if (parent instanceof Run) {
+      const run = map._getRun(parent.Id)!;
+      const at = Math.max(
+        0,
+        Math.min(parent.Text.length, this.offset - run.TextStart),
+      );
+      if (!text) return;
+      this.Document.SetPendingTextChanges([
+        {
+          Start: run.TextStart + at,
+          RemovedLength: 0,
+          InsertedLength: text.length,
+        },
+      ]);
+      parent.Text = parent.Text.slice(0, at) + text + parent.Text.slice(at);
+      this.Document._syncPointers();
+      return;
+    }
+    if (parent instanceof Paragraph || parent instanceof Span) {
+      const index = parent.Inlines.ToArray().findIndex(
+        (child) =>
+          map.GetElementBounds(child)!.ElementStart >= this.symbolOffset,
+      );
+      if (!text) return;
+      this.Document.SetPendingTextChanges([
+        { Start: this.offset, RemovedLength: 0, InsertedLength: text.length },
+      ]);
+      parent.Inlines.Insert(
+        index < 0 ? parent.Inlines.Count : index,
+        new Run(text),
+      );
+      this.Document._syncPointers();
+      return;
+    }
+    throw new Error("The position is not inside inline text content.");
+  }
+  DeleteTextInRun(count: number): number {
+    if (!Number.isInteger(count))
+      throw new RangeError("Character count must be an integer.");
+    if (!this.IsLive)
+      throw new Error("Snapshot pointers cannot edit a document.");
+    if (!count) return 0;
+    const segment = this.map.GetAdjacentSegment(
+      this.symbolOffset,
+      count > 0 ? LogicalDirection.Forward : LogicalDirection.Backward,
     );
-    return next?.GetInsertionPosition(direction) ?? null;
+    if (
+      !segment ||
+      segment.Context !== TextPointerContext.Text ||
+      !(segment.Element instanceof Run)
+    )
+      return 0;
+    const local = this.symbolOffset - segment.SymbolStart,
+      removed = Math.min(
+        Math.abs(count),
+        count > 0 ? segment.Text.length - local : local,
+      );
+    const start = count > 0 ? local : local - removed;
+    this.Document.SetPendingTextChanges([
+      {
+        Start: segment.TextStart + start,
+        RemovedLength: removed,
+        InsertedLength: 0,
+      },
+    ]);
+    segment.Element.Text =
+      segment.Text.slice(0, start) + segment.Text.slice(start + removed);
+    this.Document._syncPointers();
+    return removed;
   }
   private ensureDocument(other: TextPointer): void {
-    if (!(other instanceof TextPointer) || other.Document !== this.Document)
+    if (!this.IsInSameDocument(other))
       throw new Error("Text positions belong to different documents.");
   }
 }

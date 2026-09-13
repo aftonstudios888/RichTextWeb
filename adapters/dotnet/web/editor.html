@@ -11,35 +11,49 @@
         height: 100%;
         font: 14px system-ui;
       }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      rich-text-toolbar {
+        display: block;
+        flex: none;
+      }
       rich-text-box {
         display: block;
-        height: 100%;
+        flex: 1;
+        min-height: 0;
       }
     </style>
+    <script src="./richtextweb.global.js"></script>
   </head>
   <body>
-    <rich-text-box aria-label="Document editor"></rich-text-box>
-    <script type="module">
-      import {
-        connectScriptHost,
-        connectWebView2,
-        registerRichTextWeb,
-      } from "./dist/esm/index.js";
-      registerRichTextWeb();
+    <rich-text-toolbar
+      for="editor"
+      aria-label="Document commands"
+    ></rich-text-toolbar>
+    <rich-text-box
+      id="editor"
+      aria-label="Document editor"
+      theme="light"
+    ></rich-text-box>
+    <script>
+      RichTextWeb.registerRichTextWeb();
+      RichTextWeb.registerRichTextToolbar();
       const editor = document.querySelector("rich-text-box");
       const options = {
         isReadOnly: () => editor.IsReadOnly,
         includeDocumentInEvents: true,
       };
       if (typeof window.invokeCSharpAction === "function") {
-        window.richTextBridge = connectScriptHost(
+        window.richTextBridge = RichTextWeb.connectScriptHost(
           editor.Engine,
           window,
           (json) => window.invokeCSharpAction(json),
           options,
         );
       } else if (window.chrome?.webview) {
-        window.richTextBridge = connectWebView2(
+        window.richTextBridge = RichTextWeb.connectWebView2(
           editor.Engine,
           window.chrome.webview,
           options,

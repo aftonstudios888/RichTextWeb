@@ -157,6 +157,16 @@ export function deleteRange(
   end: number,
 ): void {
   if (end <= start) return;
+  const single = leaves(root).find(
+    (leaf) =>
+      leaf.node.type === "Run" && start >= leaf.start && end <= leaf.end,
+  );
+  if (single) {
+    const value = single.node.text ?? "";
+    single.node.text =
+      value.slice(0, start - single.start) + value.slice(end - single.start);
+    return;
+  }
   const blocks = textBlocks(root),
     first =
       blocks.find((block) => start >= block.start && start <= block.end) ??
@@ -210,6 +220,29 @@ export function insertText(
   text: string,
   props: Record<string, any>,
 ): number {
+  if (!text.includes("\n") && !text.includes("\r")) {
+    const list = leaves(root),
+      leaf =
+        list.find(
+          (item) =>
+            item.node.type === "Run" &&
+            item.start < offset &&
+            item.end >= offset,
+        ) ??
+        list.find((item) => item.node.type === "Run" && item.start === offset);
+    if (
+      leaf &&
+      Object.entries(props).every(
+        ([name, value]) =>
+          JSON.stringify(leaf.props[name]) === JSON.stringify(value),
+      )
+    ) {
+      const local = offset - leaf.start,
+        value = leaf.node.text ?? "";
+      leaf.node.text = value.slice(0, local) + text + value.slice(local);
+      return offset + text.length;
+    }
+  }
   const block = pointBlock(root, offset);
   if (block.node.type !== "Paragraph") {
     const paragraph = makeNode("Paragraph");
@@ -347,6 +380,9 @@ export function mapMetadata(
   if (Array.isArray(items))
     for (const item of items) {
       item.Start = move(item.Start, false);
-      item.End = Math.max(item.Start, move(item.End, true));
+      item.End =
+        item.Kind === "Deletion"
+          ? item.Start
+          : Math.max(item.Start, move(item.End, true));
     }
 }

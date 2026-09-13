@@ -1,0 +1,27 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12.0</LangVersion>
+    <Version>0.2.0</Version>
+    <Authors>RichTextWeb contributors</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/wieslawsoltes/RichTextWeb</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/wieslawsoltes/RichTextWeb</PackageProjectUrl>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <DebugType>portable</DebugType>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <WebView2Version>1.0.3537.50</WebView2Version>
+    <WindowsAppSdkVersion>1.7.260224002</WindowsAppSdkVersion>
+    <AvaloniaVersion>11.3.9</AvaloniaVersion>
+    <AvaloniaWebViewVersion>11.3.16</AvaloniaWebViewVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)PACKAGE.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
+</Project>

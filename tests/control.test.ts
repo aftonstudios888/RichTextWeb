@@ -4,6 +4,7 @@ import {
   RichTextBox,
   FlowDocumentReader,
   FlowDocumentScrollViewer,
+  FlowDocumentPageViewer,
   registerRichTextWeb,
 } from "../src/control.js";
 import { FlowDocument, Paragraph, Run } from "../src/model.js";
@@ -12,6 +13,7 @@ import {
   safeImageSource,
   thicknessCSS,
 } from "../src/control-renderer.js";
+import { pageSettings } from "../src/pagination.js";
 
 test("control module and registration are safe without browser globals", () => {
   assert.doesNotThrow(() => registerRichTextWeb(undefined));
@@ -91,4 +93,35 @@ test("layout values accept .NET Thickness and finite CSS lengths", () => {
   assert.equal(thicknessCSS("1em 2em"), "1em 2em");
   assert.equal(thicknessCSS("10px; background:url(x)"), undefined);
   assert.equal(thicknessCSS(Infinity), undefined);
+});
+
+test("page settings produce bounded paper and reserve footnote space", () => {
+  const settings = pageSettings({
+    PageWidth: 420,
+    PageHeight: 350,
+    PagePadding: { Left: 30, Top: 40, Right: 50, Bottom: 60 },
+    Footnotes: [{ Id: "1", Blocks: [] }],
+    FootnoteAreaHeight: 48,
+  });
+  assert.equal(settings.ContentWidth, 340);
+  assert.equal(settings.ContentHeight, 202);
+  assert.equal(settings.FootnoteHeight, 48);
+  const fallback = pageSettings({
+    PageWidth: NaN,
+    PageHeight: Infinity,
+    PagePadding: -100,
+  });
+  assert.equal(fallback.PageWidth, 794);
+  assert.equal(fallback.PageHeight, 1123);
+  assert.equal(fallback.Padding.Top, 0);
+});
+
+test("page viewer navigation and measurement are explicit during SSR", async () => {
+  const viewer = new FlowDocumentPageViewer();
+  assert.equal(viewer.PageCount, 1);
+  assert.equal(viewer.PageNumber, 1);
+  assert.equal(viewer.NextPage(), false);
+  assert.equal(viewer.GoToPage(1), true);
+  await assert.rejects(viewer.Repaginate(), /connected browser/);
+  viewer.Dispose();
 });
