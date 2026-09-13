@@ -151,7 +151,7 @@ try {
     `react@${manifest.devDependencies.react}`,
     `@types/react@${manifest.devDependencies["@types/react"]}`,
   ];
-  if (process.env.RICHTEXTWEB_PACKAGE_ONLINE === "1")
+  if (process.env.RICHTEXTWEB_PACKAGE_OFFLINE !== "1")
     install.splice(install.indexOf("--offline"), 1);
   run(npm, install, consumer);
 
