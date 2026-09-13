@@ -6,10 +6,30 @@ import {
   StandardFonts,
   degrees,
   rgb,
+  pushGraphicsState,
+  popGraphicsState,
+  concatTransformationMatrix,
   type Color,
 } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { FlowDocument, type DocumentNode } from "./model.js";
+import {
+  inspectPDFText,
+  replacePDFTextOperator,
+  replacePDFSourceText,
+  type PDFTextInspection,
+  type PDFTextReplacementOptions,
+  type PDFSourceTextReplaceOptions,
+  type PDFTextEditResult,
+} from "./pdf-operators.js";
+export type {
+  PDFTextOperator,
+  PDFTextDiagnostic,
+  PDFTextInspection,
+  PDFTextReplacementOptions,
+  PDFSourceTextReplaceOptions,
+  PDFTextEditResult,
+} from "./pdf-operators.js";
 
 /** PDF coordinates are points (1/72 inch). FlowDocument dimensions are CSS pixels. */
 export interface PDFExportOptions {
@@ -81,7 +101,12 @@ export interface PDFImageOptions {
 
 type Props = Record<string, any>;
 type Insets = { left: number; top: number; right: number; bottom: number };
-type Fragment = { text: string; props: Props; image?: DocumentNode };
+type Fragment = {
+  text: string;
+  props: Props;
+  image?: DocumentNode;
+  anchor?: DocumentNode;
+};
 type Piece = {
   text: string;
   props: Props;
@@ -90,8 +115,30 @@ type Piece = {
   width: number;
   height: number;
   image?: PDFImage;
+  story?: FloatingStory;
 };
-type Line = { pieces: Piece[]; width: number; height: number };
+type Line = {
+  pieces: Piece[];
+  width: number;
+  height: number;
+  xOffset?: number;
+  availableWidth?: number;
+};
+type StoryItem = {
+  line?: Line;
+  x: number;
+  top: number;
+  width: number;
+  height?: number;
+  props: Props;
+};
+type FloatingStory = {
+  node: DocumentNode;
+  props: Props;
+  width: number;
+  height: number;
+  items: StoryItem[];
+};
 const PIXEL = 0.75;
 
 function finite(value: unknown, fallback: number): number {
@@ -270,6 +317,8 @@ function inlineFragments(node: DocumentNode, parent: Props): Fragment[] {
   const props = inherited(node, parent);
   if (node.type === "LineBreak") return [{ text: "\n", props }];
   if (node.type === "Image") return [{ text: "", props, image: node }];
+  if (node.type === "Figure" || node.type === "Floater")
+    return [{ text: "", props, anchor: node }];
   const result: Fragment[] = [];
   if (typeof node.text === "string") result.push({ text: node.text, props });
   for (const child of node.children ?? [])
@@ -324,6 +373,17 @@ export async function toPDF(
   const pageFonts = new WeakMap<PDFPage, PDFFont>();
   let page = pdf.addPage([width, height]);
   let y = height - margin.top;
+  const storyCache = new Map<DocumentNode, FloatingStory>();
+  const buildingStories = new Set<DocumentNode>();
+  const floatingAreas: {
+    page: PDFPage;
+    x: number;
+    top: number;
+    width: number;
+    height: number;
+    distance: number;
+    tight: boolean;
+  }[] = [];
 
   async function getFont(p: Props): Promise<PDFFont> {
     const name = fontName(p);
@@ -407,6 +467,10 @@ export async function toPDF(
     fragments: Fragment[],
     maxWidth: number,
     paragraph: Props,
+    area?: (
+      offset: number,
+      lineHeight: number,
+    ) => { left: number; width: number },
   ): Promise<Line[]> {
     positive(maxWidth, "Paragraph content width");
     const size = positive(finite(paragraph.FontSize, 16) * PIXEL, "Font size");
@@ -415,10 +479,24 @@ export async function toPDF(
       finite(paragraph.LineHeight, 0) * PIXEL,
     );
     const result: Line[] = [];
+    let offset = 0;
+    let lineWidth = maxWidth;
     let current: Line = { pieces: [], width: 0, height: baseHeight };
+    const configure = () => {
+      const bounds = area?.(offset, current.height);
+      lineWidth = positive(
+        bounds?.width ?? maxWidth,
+        "Floating text line width",
+      );
+      current.xOffset = bounds?.left ?? 0;
+      current.availableWidth = lineWidth;
+    };
+    configure();
     const flush = () => {
       result.push(current);
+      offset += current.height;
       current = { pieces: [], width: 0, height: baseHeight };
+      configure();
     };
     for (const fragment of fragments) {
       const font = await getFont(fragment.props);
@@ -430,6 +508,31 @@ export async function toPDF(
         fontSize * 1.25,
         finite(fragment.props.LineHeight, 0) * PIXEL,
       );
+      if (fragment.anchor) {
+        const story = await floatingStory(
+          fragment.anchor,
+          fragment.props,
+          maxWidth,
+        );
+        if (current.width + story.width > lineWidth && current.pieces.length)
+          flush();
+        if (story.width > lineWidth + 0.01)
+          throw new RangeError(
+            "Inline floating story is wider than its PDF line.",
+          );
+        current.pieces.push({
+          text: "",
+          props: fragment.props,
+          font,
+          size: fontSize,
+          width: story.width,
+          height: story.height,
+          story,
+        });
+        current.width += story.width;
+        current.height = Math.max(current.height, story.height);
+        continue;
+      }
       if (fragment.image) {
         const image = await getImage(fragment.image);
         let imageWidth =
@@ -443,12 +546,12 @@ export async function toPDF(
         positive(imageHeight, "Image height");
         const scale = Math.min(
           1,
-          maxWidth / imageWidth,
+          lineWidth / imageWidth,
           positive(availableHeight - 2, "Image content height") / imageHeight,
         );
         imageWidth *= scale;
         imageHeight *= scale;
-        if (current.width + imageWidth > maxWidth && current.pieces.length)
+        if (current.width + imageWidth > lineWidth && current.pieces.length)
           flush();
         current.pieces.push({
           text: "",
@@ -473,7 +576,7 @@ export async function toPDF(
         let remaining = token;
         while (remaining) {
           const tokenWidth = font.widthOfTextAtSize(remaining, fontSize);
-          if (tokenWidth <= maxWidth - current.width + 0.0001) {
+          if (tokenWidth <= lineWidth - current.width + 0.0001) {
             current.pieces.push({
               text: remaining,
               props: fragment.props,
@@ -495,7 +598,7 @@ export async function toPDF(
           let partWidth = 0;
           for (const char of remaining) {
             const charWidth = font.widthOfTextAtSize(char, fontSize);
-            if (partWidth + charWidth > maxWidth + 0.0001) break;
+            if (partWidth + charWidth > lineWidth + 0.0001) break;
             partWidth += charWidth;
             count += char.length;
           }
@@ -533,6 +636,8 @@ export async function toPDF(
           previous &&
           !previous.image &&
           !piece.image &&
+          !previous.story &&
+          !piece.story &&
           previous.props === piece.props &&
           previous.font === piece.font &&
           previous.size === piece.size
@@ -557,7 +662,9 @@ export async function toPDF(
     if (alignment === "right") x += lineWidth - line.width;
     else if (alignment === "center") x += (lineWidth - line.width) / 2;
     for (const piece of line.pieces) {
-      if (piece.image) {
+      if (piece.story) {
+        drawStory(piece.story, x, top);
+      } else if (piece.image) {
         page.drawImage(piece.image, {
           x,
           y: top - piece.height,
@@ -610,6 +717,347 @@ export async function toPDF(
     }
   }
 
+  function storyDimension(
+    value: any,
+    axis: "width" | "height",
+    span: number,
+    fallback: number,
+  ): number {
+    if (
+      value === undefined ||
+      value === null ||
+      value?.FigureUnitType === "Auto"
+    )
+      return fallback;
+    if (typeof value === "object") {
+      const unit = value.FigureUnitType ?? "Pixel",
+        amount = finite(value.Value, 0);
+      return positive(
+        amount *
+          (unit === "Page"
+            ? axis === "width"
+              ? width
+              : height
+            : unit === "Content" || unit === "Column"
+              ? axis === "width"
+                ? span
+                : availableHeight
+              : PIXEL),
+        `Figure ${axis}`,
+      );
+    }
+    return positive(finite(value, 0) * PIXEL, `Figure ${axis}`);
+  }
+
+  async function floatingStory(
+    node: DocumentNode,
+    parent: Props,
+    span: number,
+  ): Promise<FloatingStory> {
+    const cached = storyCache.get(node);
+    if (cached) return cached;
+    if (buildingStories.has(node) || buildingStories.size >= 8)
+      throw new Error("PDF anchored stories exceed supported nesting depth.");
+    buildingStories.add(node);
+    try {
+      const p = inherited(node, parent),
+        boxWidth = storyDimension(
+          node.props.Width,
+          "width",
+          span,
+          Math.min(span * 0.4, 180),
+        );
+      const pad = insets(node.props.Padding, 6, PIXEL),
+        contentWidth = positive(
+          boxWidth - pad.left - pad.right,
+          "Figure content width",
+        );
+      const items: StoryItem[] = [];
+      let top = pad.top;
+      async function collect(
+        child: DocumentNode,
+        inheritedProps: Props,
+        left: number,
+        lineWidth: number,
+        prefix = "",
+      ): Promise<void> {
+        const cp = inherited(child, inheritedProps);
+        if (
+          child.type === "Paragraph" ||
+          child.type === "Image" ||
+          child.type === "Figure" ||
+          child.type === "Floater"
+        ) {
+          const gap = insets(child.props.Margin, 0, PIXEL);
+          top += gap.top;
+          const fragments = inlineFragments(child, inheritedProps);
+          if (prefix) fragments.unshift({ text: prefix, props: cp });
+          for (const line of await lines(
+            fragments,
+            positive(
+              lineWidth - gap.left - gap.right,
+              "Figure paragraph width",
+            ),
+            cp,
+          )) {
+            items.push({
+              line,
+              x: left + gap.left,
+              top,
+              width: lineWidth - gap.left - gap.right,
+              props: cp,
+            });
+            top += line.height;
+          }
+          top += gap.bottom || finite(cp.FontSize, 16) * PIXEL * 0.4;
+          return;
+        }
+        if (child.type === "Table") {
+          const rows = (child.children ?? [])
+            .flatMap((group) =>
+              group.type === "TableRowGroup" ? (group.children ?? []) : [group],
+            )
+            .filter((row) => row.type === "TableRow");
+          const columns = Math.max(
+            1,
+            ...rows.map((row) =>
+              (row.children ?? []).reduce(
+                (n, cell) => n + Math.max(1, finite(cell.props.ColumnSpan, 1)),
+                0,
+              ),
+            ),
+          );
+          for (const row of rows) {
+            const rowTop = top;
+            let columnX = left,
+              rowHeight = 0;
+            for (const cell of row.children ?? []) {
+              if (finite(cell.props.RowSpan, 1) !== 1)
+                throw new Error(
+                  "PDF anchored tables do not support RowSpan greater than one.",
+                );
+              const cellWidth =
+                  (lineWidth * Math.max(1, finite(cell.props.ColumnSpan, 1))) /
+                  columns,
+                cellPad = insets(cell.props.Padding, 4, PIXEL),
+                cellProps = inherited(cell, inherited(row, cp));
+              const before = items.length;
+              top = rowTop + cellPad.top;
+              for (const block of cell.children ?? [])
+                await collect(
+                  block,
+                  cellProps,
+                  columnX + cellPad.left,
+                  positive(
+                    cellWidth - cellPad.left - cellPad.right,
+                    "Figure table cell width",
+                  ),
+                );
+              const cellHeight = top - rowTop + cellPad.bottom;
+              rowHeight = Math.max(rowHeight, cellHeight);
+              items.splice(before, 0, {
+                x: columnX,
+                top: rowTop,
+                width: cellWidth,
+                height: cellHeight,
+                props: cellProps,
+              });
+              columnX += cellWidth;
+            }
+            for (const item of items)
+              if (item.top === rowTop && !item.line) item.height = rowHeight;
+            top = rowTop + rowHeight;
+          }
+          top += 6;
+          return;
+        }
+        if (child.type === "List") {
+          let index = finite(child.props.StartIndex, 1);
+          for (const item of child.children ?? []) {
+            let first = true;
+            for (const block of item.children ?? []) {
+              await collect(
+                block,
+                inherited(item, cp),
+                left + 12,
+                lineWidth - 12,
+                first
+                  ? String(cp.MarkerStyle ?? "Disc").toLowerCase() === "decimal"
+                    ? `${index}. `
+                    : "• "
+                  : "",
+              );
+              first = false;
+            }
+            index++;
+          }
+          return;
+        }
+        if (["Section", "ListItem", "BlockUIContainer"].includes(child.type)) {
+          for (const block of child.children ?? [])
+            await collect(block, cp, left, lineWidth);
+          return;
+        }
+        if (child.text || child.children?.length)
+          throw new Error(
+            `Unsupported PDF anchored story block: ${child.type}.`,
+          );
+      }
+      for (const child of node.children ?? [])
+        await collect(child, p, pad.left, contentWidth);
+      const minimum = Math.max(
+        top + pad.bottom,
+        pad.top + pad.bottom + finite(p.FontSize, 16) * PIXEL * 1.25,
+      );
+      const boxHeight = storyDimension(
+        node.props.Height,
+        "height",
+        availableWidth,
+        minimum,
+      );
+      if (boxHeight + 0.01 < minimum)
+        throw new RangeError(
+          "Figure height is too small for its PDF story content.",
+        );
+      if (boxWidth > width || boxHeight > availableHeight)
+        throw new RangeError(
+          "Figure exceeds the PDF page area; resize it before exporting.",
+        );
+      const story = {
+        node,
+        props: p,
+        width: boxWidth,
+        height: boxHeight,
+        items,
+      };
+      storyCache.set(node, story);
+      return story;
+    } finally {
+      buildingStories.delete(node);
+    }
+  }
+
+  function drawStory(
+    story: FloatingStory,
+    left: number,
+    top: number,
+    target = page,
+  ): void {
+    const previous = page;
+    page = target;
+    const rotation = finite(story.node.props.Rotation, 0),
+      angle = (rotation * Math.PI) / 180,
+      cx = left + story.width / 2,
+      cy = top - story.height / 2;
+    page.pushOperators(pushGraphicsState());
+    if (rotation)
+      page.pushOperators(
+        concatTransformationMatrix(
+          Math.cos(angle),
+          Math.sin(angle),
+          -Math.sin(angle),
+          Math.cos(angle),
+          cx - Math.cos(angle) * cx + Math.sin(angle) * cy,
+          cy - Math.sin(angle) * cx - Math.cos(angle) * cy,
+        ),
+      );
+    const border = insets(story.node.props.BorderThickness, 0, PIXEL),
+      borderWidth = Math.max(...Object.values(border));
+    if (story.props.Background || borderWidth) {
+      const decoration = {
+        ...(story.props.Background
+          ? { color: color(story.props.Background) }
+          : {}),
+        ...(borderWidth
+          ? {
+              borderWidth,
+              borderColor: color(story.node.props.BorderBrush ?? "#cbd5e1"),
+            }
+          : { borderWidth: 0 }),
+      };
+      if (story.node.props.Shape === "Ellipse")
+        page.drawEllipse({
+          x: cx,
+          y: cy,
+          xScale: story.width / 2,
+          yScale: story.height / 2,
+          ...decoration,
+        });
+      else
+        page.drawRectangle({
+          x: left,
+          y: top - story.height,
+          width: story.width,
+          height: story.height,
+          ...decoration,
+        });
+    }
+    for (const item of story.items) {
+      if (item.line)
+        drawLine(
+          item.line,
+          left + item.x,
+          top - item.top,
+          item.width,
+          item.props,
+        );
+      else
+        page.drawRectangle({
+          x: left + item.x,
+          y: top - item.top - item.height!,
+          width: item.width,
+          height: item.height!,
+          borderWidth: 0.5,
+          borderColor: color(item.props.BorderBrush ?? "#cbd5e1"),
+          ...(item.props.Background
+            ? { color: color(item.props.Background) }
+            : {}),
+        });
+    }
+    page.pushOperators(popGraphicsState());
+    page = previous;
+  }
+
+  function floatingLineArea(
+    top: number,
+    lineHeight: number,
+    left: number,
+    span: number,
+    target: PDFPage,
+  ): { left: number; width: number } {
+    let leftInset = 0,
+      rightInset = 0;
+    for (const area of floatingAreas) {
+      if (
+        area.page !== target ||
+        top - lineHeight >= area.top + area.distance ||
+        top <= area.top - area.height - area.distance
+      )
+        continue;
+      let x = area.x,
+        right = area.x + area.width;
+      if (area.tight) {
+        const center = area.top - area.height / 2,
+          relative = Math.min(
+            1,
+            Math.abs(top - lineHeight / 2 - center) /
+              (area.height / 2 + area.distance),
+          );
+        const extent =
+          (Math.sqrt(Math.max(0, 1 - relative * relative)) * area.width) / 2;
+        x = area.x + area.width / 2 - extent;
+        right = area.x + area.width / 2 + extent;
+      }
+      if (area.x + area.width / 2 < left + span / 2)
+        leftInset = Math.max(leftInset, right + area.distance - left);
+      else rightInset = Math.max(rightInset, left + span - x + area.distance);
+    }
+    return {
+      left: Math.max(0, leftInset),
+      width: span - Math.max(0, leftInset) - Math.max(0, rightInset),
+    };
+  }
+
   async function paragraph(
     node: DocumentNode,
     parent: Props,
@@ -628,36 +1076,172 @@ export async function toPDF(
     ensureSpace(gap.top + fontSize * 1.25);
     y -= gap.top;
     const contentWidth = span - gap.left - gap.right;
-    const fragments = inlineFragments(node, parent);
+    const allFragments = inlineFragments(node, parent);
+    const anchored = allFragments.filter(
+      (fragment) =>
+        fragment.anchor && fragment.anchor.props.WrapStyle !== "Inline",
+    );
+    const fragments = allFragments.filter(
+      (fragment) =>
+        !fragment.anchor || fragment.anchor.props.WrapStyle === "Inline",
+    );
     if (prefix) fragments.unshift({ text: prefix, props: p });
-    const paragraphLines = await lines(fragments, contentWidth, p);
-    const firstIndent = finite(p.TextIndent, 0) * PIXEL;
-    if (firstIndent !== 0) {
-      // Separate layout ensures a first-line indent can never push text outside its box.
-      const indentLines = await lines(
-        fragments,
-        contentWidth - Math.max(0, firstIndent),
-        p,
-      );
-      for (let index = 0; index < indentLines.length; index++) {
-        const line = indentLines[index];
-        ensureSpace(line.height);
-        drawLine(
-          line,
-          x + gap.left + (index === 0 ? firstIndent : 0),
-          y,
-          contentWidth - Math.max(0, firstIndent),
-          p,
+    const foreground: {
+      story: FloatingStory;
+      x: number;
+      top: number;
+      page: PDFPage;
+    }[] = [];
+    const estimatedHeight = anchored.length
+      ? (await lines(fragments, contentWidth, p)).reduce(
+          (n, line) => n + line.height,
+          0,
+        )
+      : 0;
+    for (const fragment of anchored) {
+      const story = await floatingStory(
+          fragment.anchor!,
+          fragment.props,
+          contentWidth,
+        ),
+        ap = story.node.props,
+        wrap = String(ap.WrapStyle ?? "Square");
+      const vertical = String(ap.VerticalAnchor ?? "ParagraphTop");
+      if (vertical.startsWith("Paragraph") && ap.CanDelayPlacement !== false)
+        ensureSpace(
+          story.height + Math.max(0, finite(ap.VerticalOffset, 0) * PIXEL),
         );
-        y -= line.height;
-      }
-    } else {
-      for (const line of paragraphLines) {
-        ensureSpace(line.height);
-        drawLine(line, x + gap.left, y, contentWidth, p);
-        y -= line.height;
+      const anchor = String(
+        ap.HorizontalAnchor ??
+          (ap.HorizontalAlignment
+            ? `Column${ap.HorizontalAlignment}`
+            : story.node.type === "Figure"
+              ? "ColumnRight"
+              : "ColumnLeft"),
+      );
+      const baseX = anchor.startsWith("Page")
+        ? 0
+        : anchor.startsWith("Content")
+          ? margin.left
+          : x + gap.left;
+      const baseWidth = anchor.startsWith("Page")
+        ? width
+        : anchor.startsWith("Content")
+          ? availableWidth
+          : contentWidth;
+      const alignment = String(
+        ap.HorizontalAlignment ??
+          (anchor.endsWith("Center")
+            ? "Center"
+            : anchor.endsWith("Right")
+              ? "Right"
+              : "Left"),
+      );
+      const left =
+        baseX +
+        (alignment === "Right"
+          ? baseWidth - story.width
+          : alignment === "Center"
+            ? (baseWidth - story.width) / 2
+            : 0) +
+        finite(ap.HorizontalOffset, 0) * PIXEL;
+      let storyTop = vertical.startsWith("Page")
+        ? height
+        : vertical.startsWith("Content")
+          ? height - margin.top
+          : y;
+      const regionHeight = vertical.startsWith("Page")
+        ? height
+        : vertical.startsWith("Content")
+          ? availableHeight
+          : estimatedHeight;
+      if (vertical.endsWith("Center"))
+        storyTop -= (regionHeight - story.height) / 2;
+      if (vertical.endsWith("Bottom")) storyTop -= regionHeight - story.height;
+      storyTop -= finite(ap.VerticalOffset, 0) * PIXEL;
+      if (wrap === "InFrontOfText")
+        foreground.push({ story, x: left, top: storyTop, page });
+      else drawStory(story, left, storyTop);
+      if (wrap === "TopAndBottom")
+        y = Math.min(
+          y,
+          storyTop - story.height - finite(ap.WrapDistance, 12) * PIXEL,
+        );
+      else if (wrap === "Square" || wrap === "Tight") {
+        const angle = (finite(ap.Rotation, 0) * Math.PI) / 180;
+        const wrapWidth =
+          Math.abs(Math.cos(angle)) * story.width +
+          Math.abs(Math.sin(angle)) * story.height;
+        const wrapHeight =
+          Math.abs(Math.sin(angle)) * story.width +
+          Math.abs(Math.cos(angle)) * story.height;
+        floatingAreas.push({
+          page,
+          x: left + (story.width - wrapWidth) / 2,
+          top: storyTop + (wrapHeight - story.height) / 2,
+          width: wrapWidth,
+          height: wrapHeight,
+          distance: Math.max(0, finite(ap.WrapDistance, 12) * PIXEL),
+          tight: !angle && wrap === "Tight" && ap.Shape === "Ellipse",
+        });
       }
     }
+    // If both margins are occupied, continue below the nearest floating story.
+    while (
+      floatingLineArea(y, fontSize * 1.25, x + gap.left, contentWidth, page)
+        .width <
+      fontSize * 2
+    ) {
+      const active = floatingAreas.filter(
+        (area) =>
+          area.page === page &&
+          y > area.top - area.height - area.distance &&
+          y - fontSize * 1.25 < area.top + area.distance,
+      );
+      if (!active.length) break;
+      y = Math.max(
+        ...active.map((area) => area.top - area.height - area.distance),
+      );
+      ensureSpace(fontSize * 1.25);
+    }
+    const startY = y,
+      startPage = page,
+      firstIndent = finite(p.TextIndent, 0) * PIXEL;
+    const paragraphLines = await lines(
+      fragments,
+      contentWidth,
+      p,
+      (offset, lineHeight) => {
+        const onFirstPage = startY - offset - lineHeight >= margin.bottom;
+        const area = onFirstPage
+          ? floatingLineArea(
+              startY - offset,
+              lineHeight,
+              x + gap.left,
+              contentWidth,
+              startPage,
+            )
+          : { left: 0, width: contentWidth };
+        const indent = offset === 0 ? firstIndent : 0;
+        return {
+          left: area.left + indent,
+          width: area.width - Math.max(0, indent),
+        };
+      },
+    );
+    for (const line of paragraphLines) {
+      ensureSpace(line.height);
+      drawLine(
+        line,
+        x + gap.left + (line.xOffset ?? 0),
+        y,
+        line.availableWidth ?? contentWidth,
+        p,
+      );
+      y -= line.height;
+    }
+    for (const item of foreground)
+      drawStory(item.story, item.x, item.top, item.page);
     y -= Math.max(0, gap.bottom || fontSize * 0.4);
   }
 
@@ -916,10 +1500,12 @@ export async function toPDF(
 /**
  * Edits existing PDF pages by adding drawing operators and reorganizing pages.
  * Covers/highlights are visual overlays: original content remains recoverable.
- * This class deliberately exposes no destructive-redaction or text-reflow API.
+ * Source text edits rewrite actual operators. They do not constitute a document-wide redaction audit.
  */
 export class PDFEditor {
-  private constructor(private readonly pdf: PDFDocument) {
+  private sourceQueue: Promise<unknown> = Promise.resolve();
+  private mutationRevision = 0;
+  private constructor(private pdf: PDFDocument) {
     pdf.registerFontkit(fontkit);
   }
 
@@ -956,6 +1542,7 @@ export class PDFEditor {
     text: string,
     options: PDFTextOptions,
   ): Promise<void> {
+    const target = this.pdf;
     const page = this.page(pageIndex);
     this.coordinates(options.x, options.y);
     const size = positive(options.fontSize ?? 12, "Font size");
@@ -986,6 +1573,10 @@ export class PDFEditor {
         `PDF overlay text contains a character unsupported by ${font.name}: ${String(error)}`,
       );
     }
+    if (this.pdf !== target)
+      throw new Error(
+        "The PDF changed during the overlay edit; retry the operation.",
+      );
     page.drawText(text, {
       x: options.x,
       y: options.y,
@@ -996,6 +1587,7 @@ export class PDFEditor {
       maxWidth: options.maxWidth,
       lineHeight: options.lineHeight ?? size * 1.2,
     });
+    this.mutationRevision++;
   }
 
   async AddImage(
@@ -1003,6 +1595,7 @@ export class PDFEditor {
     source: string | Uint8Array | ArrayBuffer,
     options: PDFImageOptions,
   ): Promise<void> {
+    const target = this.pdf;
     const page = this.page(pageIndex);
     this.coordinates(options.x, options.y);
     if (options.width !== undefined) positive(options.width, "Image width");
@@ -1015,6 +1608,10 @@ export class PDFEditor {
         ? (options.height * image.width) / image.height
         : image.width);
     const height = options.height ?? (width * image.height) / image.width;
+    if (this.pdf !== target)
+      throw new Error(
+        "The PDF changed during the image edit; retry the operation.",
+      );
     page.drawImage(image, {
       x: options.x,
       y: options.y,
@@ -1022,6 +1619,7 @@ export class PDFEditor {
       height,
       opacity,
     });
+    this.mutationRevision++;
   }
 
   DrawRectangle(pageIndex: number, options: PDFRectangleOptions): void {
@@ -1044,6 +1642,7 @@ export class PDFEditor {
       borderColor: options.borderColor ? color(options.borderColor) : undefined,
       borderWidth: options.borderWidth ?? 0,
     });
+    this.mutationRevision++;
   }
 
   Highlight(
@@ -1074,6 +1673,7 @@ export class PDFEditor {
     if (!Number.isFinite(rotation) || rotation % 90 !== 0)
       throw new RangeError("PDF rotation must be a multiple of 90 degrees.");
     this.page(pageIndex).setRotation(degrees(((rotation % 360) + 360) % 360));
+    this.mutationRevision++;
   }
 
   /** All existing page indices must appear exactly once. */
@@ -1089,6 +1689,7 @@ export class PDFEditor {
     for (let index = this.PageCount - 1; index >= 0; index--)
       this.pdf.removePage(index);
     pages.forEach((page) => this.pdf.addPage(page));
+    this.mutationRevision++;
   }
 
   DeletePages(indices: readonly number[]): void {
@@ -1097,6 +1698,7 @@ export class PDFEditor {
     if (unique.length === this.PageCount && unique.length)
       throw new RangeError("A PDF must retain at least one page.");
     unique.forEach((index) => this.pdf.removePage(index));
+    if (unique.length) this.mutationRevision++;
   }
 
   AddPage(width = 595.28, height = 841.89): number {
@@ -1104,6 +1706,7 @@ export class PDFEditor {
       positive(width, "Page width"),
       positive(height, "Page height"),
     ]);
+    this.mutationRevision++;
     return this.PageCount - 1;
   }
 
@@ -1119,6 +1722,7 @@ export class PDFEditor {
       insertionIndex > this.PageCount
     )
       throw new RangeError("Invalid PDF page insertion index.");
+    const target = this.pdf;
     const source = await PDFDocument.load(bytes);
     const selected = indices ? [...indices] : source.getPageIndices();
     if (
@@ -1133,13 +1737,78 @@ export class PDFEditor {
       throw new RangeError(
         "Imported page indices must be unique valid source page indices.",
       );
-    const pages = await this.pdf.copyPages(source, selected);
+    const pages = await target.copyPages(source, selected);
+    if (this.pdf !== target)
+      throw new Error(
+        "The PDF changed while importing pages; retry the operation.",
+      );
     pages.forEach((page, offset) =>
       this.pdf.insertPage(insertionIndex + offset, page),
     );
+    if (pages.length) this.mutationRevision++;
+  }
+
+  /** Inspect actual text-showing operators in page streams and nested Form XObjects. */
+  async GetTextOperators(pageIndex?: number): Promise<PDFTextInspection> {
+    await this.sourceQueue.catch(() => undefined);
+    return inspectPDFText(this.pdf, pageIndex);
+  }
+
+  /** Replace original text, retaining its font unless a replacement font is supplied. */
+  async ReplaceTextOperator(
+    pageIndex: number,
+    operatorId: string,
+    replacement: string,
+    options: PDFTextReplacementOptions = {},
+  ): Promise<PDFTextEditResult> {
+    return this.editSource((pdf) =>
+      replacePDFTextOperator(pdf, pageIndex, operatorId, replacement, options),
+    );
+  }
+
+  /** Replace literal matches within original text-showing operators, with an atomic preflight. */
+  async ReplaceSourceText(
+    query: string,
+    replacement: string,
+    options: PDFSourceTextReplaceOptions = {},
+  ): Promise<PDFTextEditResult> {
+    return this.editSource((pdf) =>
+      replacePDFSourceText(pdf, query, replacement, options),
+    );
+  }
+
+  private editSource(
+    action: (pdf: PDFDocument) => Promise<PDFTextEditResult>,
+  ): Promise<PDFTextEditResult> {
+    const next = this.sourceQueue
+      .catch(() => undefined)
+      .then(async () => {
+        // Stage source/resource edits in an isolated document. Encoding or parsing
+        // failures leave both visible content and the resource graph intact.
+        const source = this.pdf,
+          revision = this.mutationRevision;
+        const staged = await PDFDocument.load(await source.save());
+        staged.registerFontkit(fontkit);
+        const result = await action(staged);
+        if (result.operatorsChanged) {
+          // Reopening also resets pdf-lib's cached writable page content streams.
+          const updated = await PDFDocument.load(await staged.save());
+          if (source !== this.pdf || revision !== this.mutationRevision)
+            throw new Error(
+              "The PDF changed during the source edit; inspect it again and retry.",
+            );
+          updated.registerFontkit(fontkit);
+          this.pdf = updated;
+          this.mutationRevision++;
+        }
+        return result;
+      });
+    this.sourceQueue = next;
+    return next;
   }
 
   async Save(): Promise<Uint8Array> {
+    await this.sourceQueue.catch(() => undefined);
     if (!this.PageCount)
       throw new Error("Add at least one page before saving the PDF.");
     return this.pdf.save();

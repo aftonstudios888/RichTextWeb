@@ -620,6 +620,39 @@ export class CollaborativeTextSession {
       };
     });
   }
+  /** Fork an isolated replica without replaying its complete operation history. */
+  Fork(actorId = this.ActorId): CollaborativeTextSession {
+    const session = new CollaborativeTextSession({
+      DocumentId: this.DocumentId,
+      ActorId: actorId,
+      Text: this.InitialText,
+      MaxPendingOperations: this.maxPending,
+      MaxCharacters: this.maxCharacters,
+    });
+    session.characters = new Map(
+      [...this.characters].map(([id, item]) => [
+        id,
+        {
+          ...item,
+          Styles: new Map(
+            [...item.Styles].map(([name, stamp]) => [
+              name,
+              { ...stamp, Value: clone(stamp.Value) },
+            ]),
+          ),
+        },
+      ]),
+    );
+    session.children = new Map(
+      [...this.children].map(([id, children]) => [id, [...children]]),
+    );
+    session.vector = new Map(this.vector);
+    session.accepted = new Map(this.accepted);
+    session.pending = new Map(this.pending);
+    session.clock = this.clock;
+    session.resyncRequired = this.resyncRequired;
+    return session;
+  }
   ExportSnapshot(): CollaborationSnapshot {
     return {
       Protocol: 1,
@@ -949,3 +982,5 @@ function validateProjection(root: DocumentNode): void {
   };
   visit(root);
 }
+
+export * from "./collaboration-document.js";

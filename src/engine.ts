@@ -1,6 +1,7 @@
 import {
   EventDispatcher,
   FlowDocument,
+  Run,
   TextPointer,
   type DocumentNode,
 } from "./model.js";
@@ -28,6 +29,7 @@ import {
   CreateDocumentPatch,
   InvertDocumentPatch,
   ApplyDocumentPatch,
+  ApplyPatchToJSON,
   ReconcileDocument,
   PatchByteLength,
   type DocumentPatch,
@@ -51,6 +53,17 @@ export interface DocumentAnnotation {
   Start: number;
   End: number;
   Data: Record<string, any>;
+}
+export interface RevisionPropertyChange {
+  Scope: "Inline" | "Node";
+  NodeId?: string;
+  Start?: number;
+  End?: number;
+  Name: string;
+  HadBefore: boolean;
+  Before?: unknown;
+  HasAfter: boolean;
+  After?: unknown;
 }
 export interface EngineChangedEvent {
   Engine: RichTextEngine;
@@ -94,6 +107,8 @@ const INLINE_TYPES = new Set([
   "LineBreak",
   "Image",
   "InlineUIContainer",
+  "Figure",
+  "Floater",
 ]);
 const BLOCK_TYPES = new Set([
   "Paragraph",
@@ -266,14 +281,23 @@ export class RichTextEngine {
   private batchTokensValid = true;
   private disposed = false;
   UndoLimit = 100;
-  /** Track text replacements as reviewable insertion/deletion annotations. */
+  /** Track text, formatting, moves, and document structure as reviewable changes. */
   TrackChanges = false;
+  TrackFormatting = true;
+  private historySuppressed = 0;
   CurrentAuthor = "Author";
   private reviewSuppressed = 0;
 
   get Revisions(): DocumentAnnotation[] {
-    return this.Annotations.filter(
-      (item) => item.Kind === "Insertion" || item.Kind === "Deletion",
+    return this.Annotations.filter((item) =>
+      [
+        "Insertion",
+        "Deletion",
+        "Formatting",
+        "Move",
+        "TableStructure",
+        "Structural",
+      ].includes(item.Kind),
     );
   }
 
@@ -402,6 +426,31 @@ export class RichTextEngine {
       options?.TextChanges,
     );
   }
+  /** Apply an incoming collaborative state without making it a local undo entry.
+   * Prior local history is cleared because contextual patches are not selectively rebased.
+   */
+  ApplyRemoteDocument(
+    document: FlowDocument,
+    options?: { MapAnnotations?: boolean; TextChanges?: TextEditSpan[] },
+  ): void {
+    if (this.depth)
+      throw new Error(
+        "Finish the local change transaction before applying a remote document.",
+      );
+    this.historySuppressed++;
+    try {
+      this.ReplaceDocument(document, {
+        ...options,
+        MapAnnotations: options?.MapAnnotations ?? false,
+      });
+      this.ClearUndo();
+    } catch (error) {
+      if (error instanceof DocumentObserverError) this.ClearUndo();
+      throw error;
+    } finally {
+      this.historySuppressed--;
+    }
+  }
   BeginChange(): void {
     this.assertLive();
     if (this.depth++ === 0) {
@@ -523,7 +572,7 @@ export class RichTextEngine {
     textChanges?: TextEditSpan[],
   ): void {
     const patch = CreateDocumentPatch(state.document, after);
-    if (!patch) return;
+    if (!patch || this.historySuppressed) return;
     this.undoStack.push({
       patch,
       before: { start: state.start, end: state.end, typing: state.typing },
@@ -548,6 +597,7 @@ export class RichTextEngine {
     action: (root: DocumentNode) => void,
     mapStructure = true,
     exactTextChange?: TextEditSpan | TextEditSpan[],
+    review?: { Kind: string; Operation: string; Data?: Record<string, any> },
   ): void {
     this.assertLive();
     const before = this.snapshot(),
@@ -555,6 +605,36 @@ export class RichTextEngine {
     try {
       action(root);
       if (mapStructure) mapStructuralAnnotations(before.document, root);
+      if (
+        review &&
+        this.TrackChanges &&
+        (review.Kind !== "Formatting" || this.TrackFormatting) &&
+        !this.reviewSuppressed
+      ) {
+        const old = clone(before.document),
+          next = clone(root);
+        delete old.props.Annotations;
+        delete next.props.Annotations;
+        const patch = CreateDocumentPatch(old, next);
+        if (patch)
+          (root.props.Annotations ??= []).push({
+            Id: uid(),
+            Kind: review.Kind,
+            Start: Math.min(this.start, plainText(root).length),
+            End: Math.min(this.end, plainText(root).length),
+            Data: {
+              Author: this.CurrentAuthor,
+              CreatedAt: new Date().toISOString(),
+              Operation: review.Operation,
+              RestorePatch: InvertDocumentPatch(patch),
+              StructureAnchors: captureStructureAnchors(
+                root,
+                InvertDocumentPatch(patch),
+              ),
+              ...clone(review.Data ?? {}),
+            },
+          });
+      }
       const document = FlowDocument.FromJSON(root);
       if (
         JSON.stringify(before.document) !== JSON.stringify(document.ToJSON())
@@ -607,6 +687,7 @@ export class RichTextEngine {
     this.assertLive();
     if (!text && this.start === this.end) return;
     text = text.replace(/\r\n?/g, "\n");
+    if (this.tryDirectTextEdit(text)) return;
     const props = this.insertionProperties();
     this.mutate(
       (root) => {
@@ -656,6 +737,100 @@ export class RichTextEngine {
       },
     );
   }
+  /** Common typing path: no detached document or whole-tree reconciliation. */
+  private tryDirectTextEdit(text: string): boolean {
+    if (this.depth || this.TrackChanges || text.includes("\n")) return false;
+    const annotations = this.Document.GetValue("Annotations");
+    if (Array.isArray(annotations) && annotations.length) return false;
+    const segments = this.Document.GetSymbolMap().Segments;
+    const segment =
+      segments.find(
+        (item) =>
+          item.Element instanceof Run &&
+          item.TextStart < this.start &&
+          item.TextEnd >= this.end,
+      ) ??
+      segments.find(
+        (item) =>
+          item.Element instanceof Run &&
+          item.TextStart === this.start &&
+          item.TextEnd >= this.end &&
+          item.Context === "Text",
+      );
+    if (
+      !segment ||
+      !(segment.Element instanceof Run) ||
+      segment.Context !== "Text"
+    )
+      return false;
+    const run = segment.Element;
+    if (
+      Object.entries(this.typing).some(
+        ([name, value]) => !sameValue(run.GetValue(name), value),
+      )
+    )
+      return false;
+    const local = this.start - segment.TextStart,
+      removed = this.end - this.start,
+      value = run.Text;
+    const next = value.slice(0, local) + text + value.slice(local + removed);
+    const before = this.cursor();
+    if (next === value) {
+      this.start = this.end = this.start + text.length;
+      this.emitSelection();
+      return true;
+    }
+    const oldNode = run.ToJSON(),
+      newNode = { ...oldNode, text: next };
+    let change = CreateDocumentPatch(oldNode, newNode)!.Change;
+    for (let parent = run.Parent; parent; parent = parent.Parent)
+      change = { Id: parent.Id, Type: parent.Type, Descendants: [change] };
+    const patch: DocumentPatch = {
+      Version: 1,
+      RootId: this.Document.Id,
+      Change: change,
+    };
+    const span = {
+      Start: this.start,
+      RemovedLength: removed,
+      InsertedLength: text.length,
+    };
+    this.start = this.end = this.start + text.length;
+    const entry = { patch, before, after: this.cursor(), textChanges: [span] };
+    const oldRedo = this.redoStack;
+    if (!this.historySuppressed) {
+      this.undoStack.push(entry);
+      this.redoStack = [];
+    }
+    try {
+      this.Document.SetPendingTextChanges([span]);
+      run.Text = next;
+    } catch (error) {
+      if (run.Text !== next) {
+        if (!this.historySuppressed) {
+          this.undoStack.pop();
+          this.redoStack = oldRedo;
+        }
+        this.setCursor(before);
+        this.Document.SetPendingTextChanges([]);
+        throw error;
+      }
+      // The model commits before dispatching observers, matching the general mutation path.
+      this.trimUndo();
+      this.emitSelection();
+      throw error instanceof DocumentObserverError
+        ? error
+        : new DocumentObserverError([error]);
+    }
+    this.trimUndo();
+    this.emitSelection();
+    return true;
+  }
+  private trimUndo(): void {
+    const limit = Math.max(0, this.UndoLimit);
+    if (this.undoStack.length > limit)
+      this.undoStack.splice(0, this.undoStack.length - limit);
+  }
   AcceptRevision(id: string): void {
     const item = this.Revisions.find((change) => change.Id === id);
     if (!item) throw new Error(`Revision ${id} was not found.`);
@@ -664,6 +839,107 @@ export class RichTextEngine {
   RejectRevision(id: string): void {
     const item = this.Revisions.find((change) => change.Id === id);
     if (!item) throw new Error(`Revision ${id} was not found.`);
+    if (
+      ["Formatting", "Move", "TableStructure", "Structural"].includes(item.Kind)
+    ) {
+      this.mutate((root) => {
+        if (Array.isArray(item.Data.PropertyChanges)) {
+          const changes = item.Data.PropertyChanges as RevisionPropertyChange[];
+          // Validate all targets first: an incompatible later edit must not be overwritten.
+          for (const change of changes) validateRevisionProperty(root, change);
+          for (const change of [...changes].reverse()) {
+            const value = change.HadBefore ? change.Before : undefined;
+            if (change.Scope === "Inline")
+              formatRange(root, change.Start!, change.End!, change.Name, value);
+            else
+              setLocalProperty(
+                findNode(root, change.NodeId!)!,
+                change.Name,
+                value,
+              );
+          }
+        } else if (Array.isArray(item.Data.StructureChanges)) {
+          for (const change of item.Data.StructureChanges) {
+            const parent = findNode(root, change.ParentId);
+            if (!parent || !Array.isArray(parent.children))
+              throw new Error(
+                "Revision conflict: table container no longer exists.",
+              );
+            const removed: DocumentNode[] = change.Removed ?? [],
+              inserted: DocumentNode[] = change.Inserted ?? [];
+            let index = change.Index;
+            if (removed.length) {
+              index = parent.children.findIndex((node, at, children) =>
+                removed.every((old, i) => children[at + i]?.id === old.id),
+              );
+              if (
+                index < 0 ||
+                !sameValue(
+                  parent.children.slice(index, index + removed.length),
+                  removed,
+                )
+              )
+                throw new Error(
+                  "Revision conflict: table content has changed.",
+                );
+            }
+            if (
+              !Number.isInteger(index) ||
+              index < 0 ||
+              index > parent.children.length ||
+              inserted.some((node) => findNode(root, node.id))
+            )
+              throw new Error(
+                "Revision conflict: table restoration context is invalid.",
+              );
+            parent.children.splice(index, removed.length, ...clone(inserted));
+          }
+        } else if (item.Data.RestorePatch) {
+          const restored = ApplyPatchToJSON(
+            root,
+            relocateRevisionPatch(
+              root,
+              item.Data.RestorePatch,
+              item.Data.StructureAnchors,
+            ),
+          );
+          root.props = restored.props;
+          root.children = restored.children;
+          root.text = restored.text;
+        } else if (item.Kind === "Move" && Array.isArray(item.Data.Nodes)) {
+          if (
+            plainText(root).slice(item.Start, item.End) !== item.Data.Text ||
+            !Number.isInteger(item.Data.SourceStart)
+          )
+            throw new Error(
+              "Revision conflict: moved content no longer matches its source.",
+            );
+          const preview = new RichTextEngine(FlowDocument.FromJSON(root));
+          try {
+            preview.Select(item.Start, item.End);
+            preview.InsertText("");
+            const source =
+              item.Data.SourceStart > item.End
+                ? item.Data.SourceStart - (item.End - item.Start)
+                : item.Data.SourceStart;
+            preview.Select(source);
+            preview.InsertFragment(item.Data.Nodes);
+            const restored = preview.Document.ToJSON();
+            root.props = restored.props;
+            root.children = restored.children;
+          } finally {
+            preview.Dispose();
+          }
+        } else
+          throw new Error(
+            "Revision conflict: this revision has no supported restoration data.",
+          );
+        root.props.Annotations = (root.props.Annotations ?? []).filter(
+          (entry: DocumentAnnotation) => entry.Id !== id,
+        );
+      });
+      return;
+    }
     if (
       item.Kind === "Insertion" &&
       item.Data.Text !== undefined &&
@@ -738,6 +1014,17 @@ export class RichTextEngine {
   RejectAllRevisions(): void {
     // Work newest-first so a replacement's insertion is rejected before its
     // deletion is restored, and dependent edits unwind in their original order.
+    // Preflight the entire dependency chain on a detached document so a late
+    // conflict cannot leave an earlier revision rejected in the live document.
+    const preview = new RichTextEngine(
+      FlowDocument.FromJSON(this.Document.ToJSON()),
+    );
+    try {
+      for (const item of [...preview.Revisions].reverse())
+        preview.RejectRevision(item.Id);
+    } finally {
+      preview.Dispose();
+    }
     this.Change(() => {
       for (const item of [...this.Revisions].reverse())
         this.RejectRevision(item.Id);
@@ -853,6 +1140,33 @@ export class RichTextEngine {
           this.Document.GetValue(name),
         );
   }
+  private formatMutation(
+    operation: string,
+    changes: RevisionPropertyChange[],
+    action: (root: DocumentNode) => void,
+  ): void {
+    this.mutate((root) => {
+      action(root);
+      if (
+        this.TrackChanges &&
+        this.TrackFormatting &&
+        !this.reviewSuppressed &&
+        changes.length
+      )
+        (root.props.Annotations ??= []).push({
+          Id: uid(),
+          Kind: "Formatting",
+          Start: this.start,
+          End: this.end,
+          Data: {
+            Author: this.CurrentAuthor,
+            CreatedAt: new Date().toISOString(),
+            Operation: operation,
+            PropertyChanges: clone(changes),
+          },
+        });
+    });
+  }
   ApplyProperty(name: string, value: unknown): void {
     this.assertLive();
     if (!name || typeof name !== "string")
@@ -862,7 +1176,17 @@ export class RichTextEngine {
       this.emitSelection();
       return;
     }
-    this.mutate((root) => formatRange(root, this.start, this.end, name, value));
+    const changes = captureInlineProperties(
+      this.Document.ToJSON(),
+      this.start,
+      this.end,
+      name,
+      value,
+    );
+    if (!changes.length) return;
+    this.formatMutation("ApplyProperty", changes, (root) =>
+      formatRange(root, this.start, this.end, name, value),
+    );
   }
   ToggleFormat(
     name: string,
@@ -875,11 +1199,14 @@ export class RichTextEngine {
     );
   }
   SetParagraphProperty(name: string, value: unknown): void {
-    this.mutate((root) => {
-      for (const block of this.selectedBlocks(root)) {
-        if (value === undefined) delete block.node.props[name];
-        else block.node.props[name] = clone(value);
-      }
+    const selected = this.selectedBlocks(this.Document.ToJSON());
+    const changes = selected.flatMap(({ node }) =>
+      captureNodeProperty(node, name, value),
+    );
+    if (!changes.length) return;
+    this.formatMutation("SetParagraphProperty", changes, (root) => {
+      for (const block of this.selectedBlocks(root))
+        setLocalProperty(block.node, name, value);
     });
   }
   private selectedBlocks(root: DocumentNode) {
@@ -901,31 +1228,38 @@ export class RichTextEngine {
       return;
     }
     this.typing = {};
-    this.mutate((root) => {
-      const strip = (items: DocumentNode[]): DocumentNode[] =>
-        items.flatMap((item) => {
-          for (const name of INLINE_PROPERTIES) delete item.props[name];
-          if (item.children) item.children = strip(item.children);
-          return ["Bold", "Italic", "Underline"].includes(item.type)
-            ? (item.children ?? [])
-            : [item];
-        });
-      for (const block of this.selectedBlocks(root)) {
-        if (block.node.type !== "Paragraph") continue;
-        const from = Math.max(0, this.start - block.start),
-          to = Math.min(block.text.length, this.end - block.start);
-        block.node.children = [
-          ...sliceInlines(block.node.children ?? [], 0, from),
-          ...strip(sliceInlines(block.node.children ?? [], from, to, from > 0)),
-          ...sliceInlines(
-            block.node.children ?? [],
-            to,
-            block.text.length,
-            true,
-          ),
-        ];
-      }
-    });
+    this.mutate(
+      (root) => {
+        const strip = (items: DocumentNode[]): DocumentNode[] =>
+          items.flatMap((item) => {
+            for (const name of INLINE_PROPERTIES) delete item.props[name];
+            if (item.children) item.children = strip(item.children);
+            return ["Bold", "Italic", "Underline"].includes(item.type)
+              ? (item.children ?? [])
+              : [item];
+          });
+        for (const block of this.selectedBlocks(root)) {
+          if (block.node.type !== "Paragraph") continue;
+          const from = Math.max(0, this.start - block.start),
+            to = Math.min(block.text.length, this.end - block.start);
+          block.node.children = [
+            ...sliceInlines(block.node.children ?? [], 0, from),
+            ...strip(
+              sliceInlines(block.node.children ?? [], from, to, from > 0),
+            ),
+            ...sliceInlines(
+              block.node.children ?? [],
+              to,
+              block.text.length,
+              true,
+            ),
+          ];
+        }
+      },
+      true,
+      undefined,
+      { Kind: "Formatting", Operation: "ClearFormatting" },
+    );
   }
   InsertNode(node: DocumentNode): void {
     this.InsertFragment([node]);
@@ -948,66 +1282,79 @@ export class RichTextEngine {
       throw new Error(
         "A fragment must contain either inline nodes or block nodes.",
       );
-    this.mutate((root) => {
-      const from = this.start,
-        to = this.end,
-        oldLength = plainText(root).length;
-      deleteRange(root, from, to);
-      const block = pointBlock(root, Math.min(from, plainText(root).length));
-      const inserted = list.map(newIds);
-      if (block.node.type !== "Paragraph")
-        throw new Error("Select a text paragraph before inserting a fragment.");
-      const local = Math.max(0, from - block.start),
-        before = sliceInlines(block.node.children ?? [], 0, local),
-        after = sliceInlines(
-          block.node.children ?? [],
-          local,
-          block.text.length,
-          true,
-        );
-      if (allInline) {
-        block.node.children = [...before, ...inserted, ...after];
-        this.start = this.end = from + inserted.map(inlineText).join("").length;
-      } else {
-        // Paragraph fragments join at the caret; structural blocks retain their
-        // block boundary and are surrounded only when text requires it.
-        const replacement: DocumentNode[] = [];
-        if (inserted[0].type === "Paragraph")
-          inserted[0].children = [...before, ...(inserted[0].children ?? [])];
-        else if (before.length)
-          replacement.push({ ...clone(block.node), children: before });
-        replacement.push(...inserted);
-        const tail = inserted.at(-1)!;
-        const tailTextBefore = inlineText(tail).length;
-        if (tail.type === "Paragraph")
-          tail.children = [...(tail.children ?? []), ...after];
-        else if (after.length)
-          replacement.push(
-            local === 0
-              ? clone(block.node)
-              : makeNode("Paragraph", after, clone(block.node.props)),
+    this.mutate(
+      (root) => {
+        const from = this.start,
+          to = this.end,
+          oldLength = plainText(root).length;
+        deleteRange(root, from, to);
+        const block = pointBlock(root, Math.min(from, plainText(root).length));
+        const inserted = list.map(newIds);
+        if (block.node.type !== "Paragraph")
+          throw new Error(
+            "Select a text paragraph before inserting a fragment.",
           );
-        block.parent.children!.splice(block.index, 1, ...replacement);
-        const resultingBlocks = textBlocks(root);
-        const tailBlock =
-          tail.type === "Paragraph"
-            ? resultingBlocks.find((item) => item.node === tail)
-            : resultingBlocks
-                .filter((item) => containsNode(tail, item.node.id))
-                .at(-1);
-        this.start = this.end = tailBlock
-          ? tail.type === "Paragraph"
-            ? tailBlock.start + tailTextBefore
-            : tailBlock.end
-          : Math.min(from, plainText(root).length);
-      }
-      mapMetadata(
-        root,
-        from,
-        to,
-        plainText(root).length - oldLength + to - from,
-      );
-    }, false);
+        const local = Math.max(0, from - block.start),
+          before = sliceInlines(block.node.children ?? [], 0, local),
+          after = sliceInlines(
+            block.node.children ?? [],
+            local,
+            block.text.length,
+            true,
+          );
+        if (allInline) {
+          block.node.children = [...before, ...inserted, ...after];
+          this.start = this.end =
+            from + inserted.map(inlineText).join("").length;
+        } else {
+          // Paragraph fragments join at the caret; structural blocks retain their
+          // block boundary and are surrounded only when text requires it.
+          const replacement: DocumentNode[] = [];
+          if (inserted[0].type === "Paragraph")
+            inserted[0].children = [...before, ...(inserted[0].children ?? [])];
+          else if (before.length)
+            replacement.push({ ...clone(block.node), children: before });
+          replacement.push(...inserted);
+          const tail = inserted.at(-1)!;
+          const tailTextBefore = inlineText(tail).length;
+          if (tail.type === "Paragraph")
+            tail.children = [...(tail.children ?? []), ...after];
+          else if (after.length)
+            replacement.push(
+              local === 0
+                ? clone(block.node)
+                : makeNode("Paragraph", after, clone(block.node.props)),
+            );
+          block.parent.children!.splice(block.index, 1, ...replacement);
+          const resultingBlocks = textBlocks(root);
+          const tailBlock =
+            tail.type === "Paragraph"
+              ? resultingBlocks.find((item) => item.node === tail)
+              : resultingBlocks
+                  .filter((item) => containsNode(tail, item.node.id))
+                  .at(-1);
+          this.start = this.end = tailBlock
+            ? tail.type === "Paragraph"
+              ? tailBlock.start + tailTextBefore
+              : tailBlock.end
+            : Math.min(from, plainText(root).length);
+        }
+        mapMetadata(
+          root,
+          from,
+          to,
+          plainText(root).length - oldLength + to - from,
+        );
+      },
+      false,
+      undefined,
+      {
+        Kind: list.some((node) => node.type === "Table")
+          ? "TableStructure"
+          : "Structural",
+        Operation: "InsertFragment",
+      },
+    );
   }
   InsertImage(
     source: string,
@@ -1093,192 +1440,538 @@ export class RichTextEngine {
     });
   }
   RemoveHyperlink(): void {
-    this.mutate((root) => {
-      for (const block of this.selectedBlocks(root)) {
-        if (block.node.type !== "Paragraph") continue;
-        const start = Math.max(0, this.start - block.start),
-          end = Math.min(block.text.length, this.end - block.start);
-        if (this.start === this.end) {
-          let position = block.start;
-          const unwrapAt = (items: DocumentNode[]): DocumentNode[] =>
-            items.flatMap((item) => {
-              const at = position,
-                length = inlineText(item).length;
-              if (this.start < at || this.start > at + length) {
-                position += length;
+    this.mutate(
+      (root) => {
+        for (const block of this.selectedBlocks(root)) {
+          if (block.node.type !== "Paragraph") continue;
+          const start = Math.max(0, this.start - block.start),
+            end = Math.min(block.text.length, this.end - block.start);
+          if (this.start === this.end) {
+            let position = block.start;
+            const unwrapAt = (items: DocumentNode[]): DocumentNode[] =>
+              items.flatMap((item) => {
+                const at = position,
+                  length = inlineText(item).length;
+                if (this.start < at || this.start > at + length) {
+                  position += length;
+                  return [item];
+                }
+                if (item.type === "Hyperlink") {
+                  position += length;
+                  return item.children ?? [];
+                }
+                if (item.children) item.children = unwrapAt(item.children);
+                else position += length;
                 return [item];
-              }
-              if (item.type === "Hyperlink") {
-                position += length;
-                return item.children ?? [];
-              }
-              if (item.children) item.children = unwrapAt(item.children);
-              else position += length;
-              return [item];
-            });
-          block.node.children = unwrapAt(block.node.children ?? []);
-        } else {
-          const unwrap = (items: DocumentNode[]): DocumentNode[] =>
-            items.flatMap((item) => {
-              if (item.children) item.children = unwrap(item.children);
-              return item.type === "Hyperlink" ? (item.children ?? []) : [item];
-            });
-          block.node.children = [
-            ...sliceInlines(block.node.children ?? [], 0, start),
-            ...unwrap(
-              sliceInlines(block.node.children ?? [], start, end, start > 0),
-            ),
-            ...sliceInlines(
-              block.node.children ?? [],
-              end,
-              block.text.length,
-              true,
-            ),
-          ];
+              });
+            block.node.children = unwrapAt(block.node.children ?? []);
+          } else {
+            const unwrap = (items: DocumentNode[]): DocumentNode[] =>
+              items.flatMap((item) => {
+                if (item.children) item.children = unwrap(item.children);
+                return item.type === "Hyperlink"
+                  ? (item.children ?? [])
+                  : [item];
+              });
+            block.node.children = [
+              ...sliceInlines(block.node.children ?? [], 0, start),
+              ...unwrap(
+                sliceInlines(block.node.children ?? [], start, end, start > 0),
+              ),
+              ...sliceInlines(
+                block.node.children ?? [],
+                end,
+                block.text.length,
+                true,
+              ),
+            ];
+          }
         }
-      }
-    });
+      },
+      true,
+      undefined,
+      { Kind: "Formatting", Operation: "RemoveHyperlink" },
+    );
   }
   Indent(amount = 24): void {
     if (!Number.isFinite(amount))
       throw new RangeError("Indent amount must be finite.");
-    this.mutate((root) => {
-      for (const block of this.selectedBlocks(root))
-        block.node.props.TextIndent = Math.max(
-          0,
-          Number(block.node.props.TextIndent ?? 0) + amount,
+    this.mutate(
+      (root) => {
+        for (const block of this.selectedBlocks(root))
+          block.node.props.TextIndent = Math.max(
+            0,
+            Number(block.node.props.TextIndent ?? 0) + amount,
+          );
+      },
+      true,
+      undefined,
+      { Kind: "Formatting", Operation: "Indent" },
+    );
+  }
+  SetElementProperty(id: string, name: string, value: unknown): void {
+    if (!name || typeof name !== "string")
+      throw new TypeError("A property name is required.");
+    const node = findNode(this.Document.ToJSON(), id);
+    if (!node) throw new Error(`Element ${id} was not found.`);
+    const changes = captureNodeProperty(node, name, value);
+    if (!changes.length) return;
+    this.formatMutation("SetElementProperty", changes, (root) =>
+      setLocalProperty(findNode(root, id)!, name, value),
+    );
+  }
+  SetTableProperty(name: string, value: unknown): void {
+    this.SetElementProperty(
+      tableContext(this.Document.ToJSON(), this.start).table.id,
+      name,
+      value,
+    );
+  }
+  SetCellProperty(name: string, value: unknown): void {
+    this.SetElementProperty(
+      tableContext(this.Document.ToJSON(), this.start).cell.id,
+      name,
+      value,
+    );
+  }
+  /** Edit the independent text story hosted by a Figure/Floater, as one parent undo/review operation. */
+  EditFloatingContent(
+    id: string,
+    action: (story: RichTextEngine) => void,
+  ): void {
+    if (typeof action !== "function")
+      throw new TypeError("A story editing action is required.");
+    const target = findNode(this.Document.ToJSON(), id);
+    if (!target || !["Figure", "Floater"].includes(target.type))
+      throw new Error("The target must be a Figure or Floater.");
+    const story = new RichTextEngine(
+      FlowDocument.FromJSON(
+        makeNode("FlowDocument", clone(target.children ?? []), {
+          ...Object.fromEntries(
+            Object.entries(target.props).filter(([key]) =>
+              INLINE_PROPERTIES.has(key),
+            ),
+          ),
+          Annotations: clone(target.props.StoryAnnotations ?? []),
+        }),
+      ),
+    );
+    try {
+      const outcome = action(story) as unknown;
+      if (outcome && typeof (outcome as { then?: unknown }).then === "function")
+        throw new TypeError(
+          "EditFloatingContent requires a synchronous action; prepare asynchronous content before opening the transaction.",
         );
-    });
+      const next = story.Document.ToJSON();
+      this.mutate(
+        (root) => {
+          const node = findNode(root, id)!;
+          node.children = next.children;
+          if (next.props.Annotations?.length)
+            node.props.StoryAnnotations = next.props.Annotations;
+          else delete node.props.StoryAnnotations;
+        },
+        false,
+        undefined,
+        {
+          Kind: "Structural",
+          Operation: "EditFloatingContent",
+          Data: { ElementId: id },
+        },
+      );
+    } finally {
+      story.Dispose();
+    }
+  }
+  /** Move rich selected content to a UTF-16 position measured before the move. */
+  MoveSelection(destination: number): void {
+    validOffset(destination, this.Document.Text.length);
+    if (
+      this.start === this.end ||
+      (destination >= this.start && destination <= this.end)
+    )
+      return;
+    const from = this.start,
+      to = this.end,
+      text = this.Selection.Text;
+    const preview = new RichTextEngine(
+      FlowDocument.FromJSON(this.Document.ToJSON()),
+    );
+    try {
+      preview.Select(from, to);
+      const nodes = preview.GetSelectedFragment().ToJSON().children ?? [];
+      const oldLength = preview.Document.Text.length;
+      preview.InsertText("");
+      if (preview.Document.Text.length !== oldLength - (to - from))
+        throw new Error(
+          "Moving a text selection cannot cross protected table or list boundaries; use MoveBlocks for structural moves.",
+        );
+      const target = destination > to ? destination - (to - from) : destination;
+      preview.Select(target);
+      preview.InsertFragment(nodes);
+      const movedEnd = preview.SelectionEnd;
+      const replacement = preview.Document.ToJSON();
+      this.mutate(
+        (root) => {
+          root.props = replacement.props;
+          root.children = replacement.children;
+          this.start = target;
+          this.end = movedEnd;
+        },
+        false,
+        undefined,
+        {
+          Kind: "Move",
+          Operation: "MoveSelection",
+          Data: {
+            Text: text,
+            Nodes: nodes,
+            SourceStart: destination < from ? from + movedEnd - target : from,
+          },
+        },
+      );
+    } finally {
+      preview.Dispose();
+    }
+  }
+  /** Move contiguous block siblings while preserving their live model identities. */
+  MoveBlocks(ids: string[], parentId: string, index: number): void {
+    if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length)
+      throw new TypeError("MoveBlocks requires unique block IDs.");
+    this.mutate(
+      (root) => {
+        const first = findNode(root, ids[0]!),
+          source = first && findParent(root, first.id),
+          target = findNode(root, parentId);
+        if (
+          !first ||
+          !source ||
+          !target ||
+          ![
+            "FlowDocument",
+            "Section",
+            "ListItem",
+            "TableCell",
+            "Figure",
+            "Floater",
+          ].includes(target.type)
+        )
+          throw new Error("Invalid block move source or destination.");
+        const start = source.children!.indexOf(first);
+        const moving = source.children!.slice(start, start + ids.length);
+        if (
+          moving.some(
+            (node, at) => node.id !== ids[at] || !BLOCK_TYPES.has(node.type),
+          ) ||
+          moving.length !== ids.length
+        )
+          throw new Error("MoveBlocks requires contiguous block siblings.");
+        if (
+          !Number.isInteger(index) ||
+          index < 0 ||
+          index > (target.children?.length ?? 0)
+        )
+          throw new RangeError("Block insertion index is out of range.");
+        if (moving.some((node) => containsNode(node, target.id)))
+          throw new Error("A block cannot be moved into its own descendants.");
+        if (
+          source === target &&
+          index >= start &&
+          index <= start + moving.length
+        )
+          return;
+        source.children!.splice(start, moving.length);
+        const at =
+          source === target && index > start ? index - moving.length : index;
+        (target.children ??= []).splice(at, 0, ...moving);
+        const selected = textBlocks(root).filter((block) =>
+          moving.some((node) => containsNode(node, block.node.id)),
+        );
+        if (selected.length) {
+          this.start = selected[0]!.start;
+          this.end = selected.at(-1)!.end;
+        }
+      },
+      true,
+      undefined,
+      { Kind: "Move", Operation: "MoveBlocks", Data: { NodeIds: clone(ids) } },
+    );
+  }
+  /** Merge adjacent cells on the current row, keeping all rich block contents. */
+  MergeTableCells(count = 2): void {
+    if (!Number.isInteger(count) || count < 2)
+      throw new RangeError(
+        "MergeTableCells requires at least two adjacent cells.",
+      );
+    this.mutate(
+      (root) => {
+        const { row, cell } = tableContext(root, this.start),
+          index = row.children!.indexOf(cell),
+          cells = row.children!.slice(index, index + count);
+        if (
+          cells.length !== count ||
+          cells.some(
+            (item) => (item.props.RowSpan ?? 1) !== (cell.props.RowSpan ?? 1),
+          )
+        )
+          throw new Error(
+            "Merged cells must be adjacent and have the same row span.",
+          );
+        cell.props.ColumnSpan = cells.reduce(
+          (sum, item) => sum + (Number(item.props.ColumnSpan) || 1),
+          0,
+        );
+        cell.children = cells.flatMap((item) => item.children ?? []);
+        row.children!.splice(index + 1, count - 1);
+      },
+      true,
+      undefined,
+      { Kind: "TableStructure", Operation: "MergeTableCells" },
+    );
+  }
+  /** Split a merged cell into its existing grid slots; contents stay in the first cell. */
+  SplitTableCell(): void {
+    this.mutate(
+      (root) => {
+        const { table, cell } = tableContext(root, this.start),
+          grid = buildTableGrid(table),
+          origin = grid.origins.get(cell.id)!;
+        if (origin.width === 1 && origin.height === 1) return;
+        delete cell.props.ColumnSpan;
+        delete cell.props.RowSpan;
+        for (let y = origin.row; y < origin.row + origin.height; y++) {
+          const row = grid.rows[y]!;
+          for (let x = origin.column; x < origin.column + origin.width; x++) {
+            if (y === origin.row && x === origin.column) continue;
+            const next = makeNode("TableCell", [makeNode("Paragraph")], {
+              ...clone(cell.props),
+            });
+            const before = row.children!.findIndex(
+              (candidate) =>
+                (grid.origins.get(candidate.id)?.column ??
+                  Number.POSITIVE_INFINITY) > x,
+            );
+            row.children!.splice(
+              before < 0 ? row.children!.length : before,
+              0,
+              next,
+            );
+            grid.origins.set(next.id, {
+              node: next,
+              row: y,
+              column: x,
+              width: 1,
+              height: 1,
+            });
+          }
+        }
+      },
+      true,
+      undefined,
+      { Kind: "TableStructure", Operation: "SplitTableCell" },
+    );
   }
   InsertTableRow(before = false): void {
-    this.mutate((root) => {
-      const context = tableContext(root, this.start);
-      validateSimpleTable(context.table);
-      const rows = context.group.children ?? [],
-        index = rows.indexOf(context.row);
-      if (
-        findTableRows(context.table).length *
-          (context.row.children?.length ?? 0) >=
-        10000
-      )
-        throw new RangeError("Table limit is 10,000 cells.");
-      rows.splice(
-        index + (before ? 0 : 1),
-        0,
-        makeNode(
-          "TableRow",
-          (context.row.children ?? []).map((cell) =>
-            makeNode("TableCell", [makeNode("Paragraph")], clone(cell.props)),
-          ),
-          clone(context.row.props),
-        ),
-      );
-    });
+    this.mutate(
+      (root) => {
+        const { table, group, row } = tableContext(root, this.start),
+          grid = buildTableGrid(table);
+        if ((grid.rows.length + 1) * grid.width > 10000)
+          throw new RangeError("Table limit is 10,000 grid cells.");
+        const at = grid.rows.indexOf(row) + (before ? 0 : 1),
+          covered = new Set<number>();
+        for (const origin of grid.origins.values())
+          if (origin.row < at && origin.row + origin.height > at) {
+            origin.node.props.RowSpan = origin.height + 1;
+            for (let x = origin.column; x < origin.column + origin.width; x++)
+              covered.add(x);
+          }
+        const cells: DocumentNode[] = [];
+        for (let x = 0; x < grid.width; x++)
+          if (!covered.has(x)) {
+            const props = clone(
+              grid.slots[Math.min(at, grid.rows.length - 1)]![x]!.props,
+            );
+            delete props.RowSpan;
+            delete props.ColumnSpan;
+            cells.push(makeNode("TableCell", [makeNode("Paragraph")], props));
+          }
+        group.children!.splice(
+          group.children!.indexOf(row) + (before ? 0 : 1),
+          0,
+          makeNode("TableRow", cells, clone(row.props)),
+        );
+      },
+      true,
+      undefined,
+      { Kind: "TableStructure", Operation: "InsertTableRow" },
+    );
   }
   DeleteTableRow(): void {
-    this.mutate((root) => {
-      const context = tableContext(root, this.start);
-      validateSimpleTable(context.table);
-      context.group.children!.splice(
-        context.group.children!.indexOf(context.row),
-        1,
-      );
-      if (!findTableRows(context.table).length)
-        replaceTableWithParagraph(root, context.table);
-    });
+    this.mutate(
+      (root) => {
+        const { table, group, row } = tableContext(root, this.start),
+          grid = buildTableGrid(table),
+          at = grid.rows.indexOf(row);
+        for (const origin of grid.origins.values()) {
+          if (origin.row < at && origin.row + origin.height > at)
+            origin.node.props.RowSpan = origin.height - 1;
+          else if (origin.row === at && origin.height > 1) {
+            origin.node.props.RowSpan = origin.height - 1;
+            const next = grid.rows[at + 1]!;
+            const index = next.children!.findIndex(
+              (cell) => grid.origins.get(cell.id)!.column > origin.column,
+            );
+            next.children!.splice(
+              index < 0 ? next.children!.length : index,
+              0,
+              origin.node,
+            );
+          }
+        }
+        group.children!.splice(group.children!.indexOf(row), 1);
+        if (!findTableRows(table).length)
+          replaceTableWithParagraph(root, table);
+      },
+      true,
+      undefined,
+      { Kind: "TableStructure", Operation: "DeleteTableRow" },
+    );
   }
   InsertTableColumn(before = false): void {
-    this.mutate((root) => {
-      const context = tableContext(root, this.start);
-      validateSimpleTable(context.table);
-      const index =
-          context.row.children!.indexOf(context.cell) + (before ? 0 : 1),
-        rows = findTableRows(context.table);
-      if (rows.length * ((rows[0].children?.length ?? 0) + 1) > 10000)
-        throw new RangeError("Table limit is 10,000 cells.");
-      for (const row of rows)
-        row.children!.splice(
-          index,
-          0,
-          makeNode(
-            "TableCell",
-            [makeNode("Paragraph")],
-            clone(row.children![Math.max(0, index - 1)]?.props ?? {}),
-          ),
-        );
-    });
+    this.mutate(
+      (root) => {
+        const { table, cell } = tableContext(root, this.start),
+          grid = buildTableGrid(table),
+          selected = grid.origins.get(cell.id)!,
+          at = selected.column + (before ? 0 : selected.width);
+        if (grid.rows.length * (grid.width + 1) > 10000)
+          throw new RangeError("Table limit is 10,000 grid cells.");
+        const covered = new Set<number>();
+        for (const origin of grid.origins.values())
+          if (origin.column < at && origin.column + origin.width > at) {
+            origin.node.props.ColumnSpan = origin.width + 1;
+            for (let y = origin.row; y < origin.row + origin.height; y++)
+              covered.add(y);
+          }
+        grid.rows.forEach((row, y) => {
+          if (covered.has(y)) return;
+          const props = clone(
+            grid.slots[y]![Math.min(at, grid.width - 1)]!.props,
+          );
+          delete props.RowSpan;
+          delete props.ColumnSpan;
+          const index = row.children!.findIndex(
+            (candidate) => grid.origins.get(candidate.id)!.column >= at,
+          );
+          row.children!.splice(
+            index < 0 ? row.children!.length : index,
+            0,
+            makeNode("TableCell", [makeNode("Paragraph")], props),
+          );
+        });
+        if (Array.isArray(table.props.Columns) && table.props.Columns.length)
+          table.props.Columns.splice(at, 0, makeNode("TableColumn"));
+      },
+      true,
+      undefined,
+      { Kind: "TableStructure", Operation: "InsertTableColumn" },
+    );
   }
   DeleteTableColumn(): void {
-    this.mutate((root) => {
-      const context = tableContext(root, this.start);
-      validateSimpleTable(context.table);
-      const index = context.row.children!.indexOf(context.cell),
-        rows = findTableRows(context.table);
-      if (context.row.children!.length === 1) {
-        replaceTableWithParagraph(root, context.table);
-        return;
-      }
-      for (const row of rows) row.children!.splice(index, 1);
-    });
+    this.mutate(
+      (root) => {
+        const { table, cell } = tableContext(root, this.start),
+          grid = buildTableGrid(table),
+          at = grid.origins.get(cell.id)!.column;
+        if (grid.width === 1) {
+          replaceTableWithParagraph(root, table);
+          return;
+        }
+        for (const origin of grid.origins.values())
+          if (origin.column <= at && origin.column + origin.width > at) {
+            if (origin.width > 1)
+              origin.node.props.ColumnSpan = origin.width - 1;
+            else {
+              const row = grid.rows[origin.row]!;
+              row.children!.splice(row.children!.indexOf(origin.node), 1);
+            }
+          }
+        if (Array.isArray(table.props.Columns))
+          table.props.Columns.splice(at, 1);
+      },
+      true,
+      undefined,
+      { Kind: "TableStructure", Operation: "DeleteTableColumn" },
+    );
   }
   DeleteTable(): void {
-    this.mutate((root) =>
-      replaceTableWithParagraph(root, tableContext(root, this.start).table),
+    this.mutate(
+      (root) =>
+        replaceTableWithParagraph(root, tableContext(root, this.start).table),
+      true,
+      undefined,
+      { Kind: "TableStructure", Operation: "DeleteTable" },
     );
   }
   ToggleList(markerStyle: string = "Disc"): void {
-    this.mutate((root) => {
-      const selected = this.selectedBlocks(root);
-      if (!selected.length) return;
-      const first = selected[0],
-        last = selected.at(-1)!;
-      const ancestors = findAncestors(root, first.node.id),
-        list = [...ancestors].reverse().find((node) => node.type === "List");
-      if (
-        list &&
-        selected.every((block) => containsNode(list, block.node.id))
-      ) {
-        if (list.props.MarkerStyle !== markerStyle) {
-          list.props.MarkerStyle = markerStyle;
+    this.mutate(
+      (root) => {
+        const selected = this.selectedBlocks(root);
+        if (!selected.length) return;
+        const first = selected[0],
+          last = selected.at(-1)!;
+        const ancestors = findAncestors(root, first.node.id),
+          list = [...ancestors].reverse().find((node) => node.type === "List");
+        if (
+          list &&
+          selected.every((block) => containsNode(list, block.node.id))
+        ) {
+          if (list.props.MarkerStyle !== markerStyle) {
+            list.props.MarkerStyle = markerStyle;
+            return;
+          }
+          const parent = findParent(root, list.id)!;
+          parent.children!.splice(
+            parent.children!.indexOf(list),
+            1,
+            ...(list.children ?? []).flatMap((item) => item.children ?? []),
+          );
           return;
         }
-        const parent = findParent(root, list.id)!;
-        parent.children!.splice(
-          parent.children!.indexOf(list),
-          1,
-          ...(list.children ?? []).flatMap((item) => item.children ?? []),
-        );
-        return;
-      }
-      if (
-        first.parent !== last.parent ||
-        selected.some(
-          (block) =>
-            block.parent !== first.parent || block.node.type !== "Paragraph",
+        if (
+          first.parent !== last.parent ||
+          selected.some(
+            (block) =>
+              block.parent !== first.parent || block.node.type !== "Paragraph",
+          )
         )
-      )
-        throw new Error(
-          "List conversion requires contiguous paragraphs in one block collection.",
+          throw new Error(
+            "List conversion requires contiguous paragraphs in one block collection.",
+          );
+        const parent = first.parent,
+          a = parent.children!.indexOf(first.node),
+          b = parent.children!.indexOf(last.node);
+        if (
+          parent
+            .children!.slice(a, b + 1)
+            .some((node) => node.type !== "Paragraph")
+        )
+          throw new Error("List conversion cannot cross structural blocks.");
+        parent.children!.splice(
+          a,
+          b - a + 1,
+          makeNode(
+            "List",
+            selected.map((block) => makeNode("ListItem", [block.node])),
+            { MarkerStyle: markerStyle, StartIndex: 1 },
+          ),
         );
-      const parent = first.parent,
-        a = parent.children!.indexOf(first.node),
-        b = parent.children!.indexOf(last.node);
-      if (
-        parent
-          .children!.slice(a, b + 1)
-          .some((node) => node.type !== "Paragraph")
-      )
-        throw new Error("List conversion cannot cross structural blocks.");
-      parent.children!.splice(
-        a,
-        b - a + 1,
-        makeNode(
-          "List",
-          selected.map((block) => makeNode("ListItem", [block.node])),
-          { MarkerStyle: markerStyle, StartIndex: 1 },
-        ),
-      );
-    });
+      },
+      true,
+      undefined,
+      { Kind: "Structural", Operation: "ToggleList" },
+    );
   }
   Find(text: string, options: FindOptions = {}): FindResult[] {
     if (typeof text !== "string" || !text.length) return [];
@@ -1531,6 +2224,34 @@ export class RichTextEngine {
           parameter.Replacement,
           parameter.Options,
         );
+      case "moveselection":
+        return this.MoveSelection(
+          typeof parameter === "number" ? parameter : parameter?.Destination,
+        );
+      case "moveblocks":
+        return this.MoveBlocks(
+          parameter.Ids,
+          parameter.ParentId,
+          parameter.Index,
+        );
+      case "setelementproperty":
+        return this.SetElementProperty(
+          parameter.Id,
+          parameter.Name,
+          parameter.Value,
+        );
+      case "settableproperty":
+        return this.SetTableProperty(parameter.Name, parameter.Value);
+      case "setcellproperty":
+        return this.SetCellProperty(parameter.Name, parameter.Value);
+      case "mergetablecells":
+        return this.MergeTableCells(parameter ?? 2);
+      case "splittablecell":
+        return this.SplitTableCell();
+      case "trackformatting":
+        if (parameter !== undefined && typeof parameter !== "boolean")
+          throw new TypeError("TrackFormatting requires a boolean.");
+        return (this.TrackFormatting = parameter ?? !this.TrackFormatting);
       case "currentauthor":
         if (typeof parameter !== "string")
           throw new TypeError("CurrentAuthor requires a string.");
@@ -1643,24 +2364,6 @@ function tableContext(root: DocumentNode, offset: number) {
 function findTableRows(table: DocumentNode): DocumentNode[] {
   return (table.children ?? []).flatMap((group) => group.children ?? []);
 }
-function validateSimpleTable(table: DocumentNode): void {
-  const rows = findTableRows(table),
-    width = rows[0]?.children?.length ?? 0;
-  if (
-    rows.some(
-      (row) =>
-        row.children?.length !== width ||
-        row.children.some(
-          (cell) =>
-            (cell.props.RowSpan ?? 1) !== 1 ||
-            (cell.props.ColumnSpan ?? 1) !== 1,
-        ),
-    )
-  )
-    throw new Error(
-      "Row and column editing currently requires a rectangular table without merged cells.",
-    );
-}
 function replaceTableWithParagraph(
   root: DocumentNode,
   table: DocumentNode,
@@ -1716,6 +2419,14 @@ function mapStructuralAnnotations(
     return trailing ? newText.length - suffix : prefix;
   };
   for (const item of after.props.Annotations as DocumentAnnotation[]) {
+    if (item.Kind === "Formatting")
+      for (const change of item.Data?.PropertyChanges ?? [])
+        if (change.Scope === "Inline") {
+          change.Start = move(change.Start, false);
+          change.End = Math.max(change.Start, move(change.End, true));
+        }
+    if (item.Kind === "Move" && Number.isInteger(item.Data?.SourceStart))
+      item.Data.SourceStart = move(item.Data.SourceStart, false);
     item.Start = move(item.Start, false);
     item.End =
       item.Kind === "Deletion"
@@ -1805,4 +2516,225 @@ function spansFromTokens(
       InsertedLength: pending,
     });
   return spans;
+}
+
+function findNode(root: DocumentNode, id: string): DocumentNode | undefined {
+  if (root.id === id) return root;
+  for (const child of root.children ?? []) {
+    const found = findNode(child, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+const sameValue = (left: unknown, right: unknown): boolean =>
+  JSON.stringify(left) === JSON.stringify(right);
+function setLocalProperty(
+  node: DocumentNode,
+  name: string,
+  value: unknown,
+): void {
+  if (value === undefined) delete node.props[name];
+  else
+    Object.defineProperty(node.props, name, {
+      value: clone(value),
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+}
+function captureNodeProperty(
+  node: DocumentNode,
+  name: string,
+  value: unknown,
+): RevisionPropertyChange[] {
+  const HadBefore = Object.hasOwn(node.props, name),
+    HasAfter = value !== undefined;
+  if (HadBefore === HasAfter && sameValue(node.props[name], value)) return [];
+  return [
+    {
+      Scope: "Node",
+      NodeId: node.id,
+      Name: name,
+      HadBefore,
+      HasAfter,
+      ...(HadBefore ? { Before: clone(node.props[name]) } : {}),
+      ...(HasAfter ? { After: clone(value) } : {}),
+    },
+  ];
+}
+function captureInlineProperties(
+  root: DocumentNode,
+  start: number,
+  end: number,
+  name: string,
+  value: unknown,
+): RevisionPropertyChange[] {
+  return leaves(root)
+    .filter((leaf) => leaf.end > start && leaf.start < end)
+    .flatMap((leaf) =>
+      captureNodeProperty(leaf.node, name, value).map((change) => ({
+        ...change,
+        Scope: "Inline" as const,
+        NodeId: undefined,
+        Start: Math.max(start, leaf.start),
+        End: Math.min(end, leaf.end),
+      })),
+    );
+}
+function validateRevisionProperty(
+  root: DocumentNode,
+  change: RevisionPropertyChange,
+): void {
+  if (
+    !change ||
+    typeof change.Name !== "string" ||
+    !["Inline", "Node"].includes(change.Scope)
+  )
+    throw new Error("Revision conflict: malformed property restoration data.");
+  const targets =
+    change.Scope === "Node"
+      ? [findNode(root, change.NodeId!)]
+      : leaves(root)
+          .filter(
+            (leaf) => leaf.end > change.Start! && leaf.start < change.End!,
+          )
+          .map((leaf) => leaf.node);
+  if (
+    change.Scope === "Inline" &&
+    (!Number.isInteger(change.Start) ||
+      !Number.isInteger(change.End) ||
+      change.Start! < 0 ||
+      change.End! < change.Start! ||
+      change.End! > plainText(root).length)
+  )
+    throw new Error("Revision conflict: formatting range is invalid.");
+  if (
+    (!targets.length && change.Start !== change.End) ||
+    targets.some(
+      (node) =>
+        !node ||
+        Object.hasOwn(node.props, change.Name) !== change.HasAfter ||
+        (change.HasAfter && !sameValue(node.props[change.Name], change.After)),
+    )
+  )
+    throw new Error(
+      `Revision conflict: ${change.Name} has changed since this formatting revision.`,
+    );
+}
+/** Relocate a structural splice by stable child identities after unrelated sibling edits. */
+function relocateRevisionPatch(
+  root: DocumentNode,
+  input: DocumentPatch,
+  anchors?: Record<
+    string,
+    { PreviousId?: string; NextId?: string; Empty?: boolean }
+  >,
+): DocumentPatch {
+  const patch = clone(input);
+  const visit = (change: DocumentPatch["Change"]) => {
+    const node = findNode(root, change.Id);
+    if (node && change.Children?.Removed.length) {
+      const ids = change.Children.Removed.map((child) => child.id);
+      const index = node.children?.findIndex((child, at, children) =>
+        ids.every((id, i) => children[at + i]?.id === id),
+      );
+      if (index !== undefined && index >= 0) change.Children.Index = index;
+    } else if (node && change.Children && anchors?.[change.Id]) {
+      const anchor = anchors[change.Id]!;
+      const previous = anchor.PreviousId
+        ? node.children?.findIndex((child) => child.id === anchor.PreviousId)
+        : undefined;
+      const next = anchor.NextId
+        ? node.children?.findIndex((child) => child.id === anchor.NextId)
+        : undefined;
+      if (
+        previous === -1 ||
+        next === -1 ||
+        (previous !== undefined && next !== undefined && previous >= next) ||
+        (anchor.Empty && node.children?.length)
+      )
+        throw new Error(
+          "Revision conflict: deleted structure lost its neighboring anchors.",
+        );
+      change.Children.Index =
+        next ?? (previous === undefined ? 0 : previous + 1);
+    }
+    change.Descendants?.forEach(visit);
+  };
+  visit(patch.Change);
+  return patch;
+}
+
+function buildTableGrid(table: DocumentNode) {
+  const rows = findTableRows(table),
+    slots: DocumentNode[][] = [],
+    origins = new Map<
+      string,
+      {
+        node: DocumentNode;
+        row: number;
+        column: number;
+        width: number;
+        height: number;
+      }
+    >();
+  let width = 0;
+  rows.forEach((row, y) => {
+    const occupied = (slots[y] ??= []);
+    let x = 0;
+    for (const cell of row.children ?? []) {
+      while (occupied[x]) x++;
+      const w = Math.max(1, Number(cell.props.ColumnSpan) || 1),
+        h = Math.max(1, Number(cell.props.RowSpan) || 1);
+      if (!Number.isInteger(w) || !Number.isInteger(h) || y + h > rows.length)
+        throw new Error("Table spans exceed the available grid.");
+      origins.set(cell.id, {
+        node: cell,
+        row: y,
+        column: x,
+        width: w,
+        height: h,
+      });
+      for (let dy = 0; dy < h; dy++)
+        for (let dx = 0; dx < w; dx++) {
+          const target = (slots[y + dy] ??= []);
+          if (target[x + dx]) throw new Error("Table spans overlap.");
+          target[x + dx] = cell;
+        }
+      x += w;
+      width = Math.max(width, x);
+    }
+  });
+  if (
+    slots.some(
+      (row) =>
+        row.length !== width ||
+        Array.from({ length: width }, (_, i) => row[i]).some((cell) => !cell),
+    )
+  )
+    throw new Error("Table editing requires a complete rectangular grid.");
+  return { rows, slots, origins, width };
+}
+
+function captureStructureAnchors(root: DocumentNode, patch: DocumentPatch) {
+  const anchors: Record<
+    string,
+    { PreviousId?: string; NextId?: string; Empty?: boolean }
+  > = {};
+  const visit = (change: DocumentPatch["Change"]) => {
+    if (change.Children) {
+      const children = findNode(root, change.Id)?.children ?? [],
+        index = change.Children.Index;
+      anchors[change.Id] = {
+        ...(children[index - 1] ? { PreviousId: children[index - 1]!.id } : {}),
+        ...(children[index + change.Children.Removed.length]
+          ? { NextId: children[index + change.Children.Removed.length]!.id }
+          : {}),
+        ...(!children.length ? { Empty: true } : {}),
+      };
+    }
+    change.Descendants?.forEach(visit);
+  };
+  visit(patch.Change);
+  return anchors;
 }

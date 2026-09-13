@@ -1,6 +1,6 @@
 {
   "name": "@wieslawsoltes/richtextweb",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reusable rich text engine, flow documents, web components and .NET-style MVVM APIs for JavaScript and React",
   "type": "module",
   "license": "MIT",
@@ -135,11 +135,19 @@
   "devDependencies": {
     "@types/node": "26.5.1",
     "@types/react": "19.3.0",
+    "@wieslawsoltes/dockyard": "0.1.0",
+    "@wieslawsoltes/dynamicdataweb": "0.1.1",
+    "@wieslawsoltes/quikgraphweb": "0.2.0",
+    "@wieslawsoltes/rbushweb": "0.1.1",
+    "@wieslawsoltes/reactiveweb": "0.2.0",
+    "@wieslawsoltes/ribbon-web": "0.1.1",
+    "@wieslawsoltes/treedatagridweb": "0.1.0",
     "esbuild": "0.28.2",
     "playwright": "1.63.0",
     "prettier": "3.9.6",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "rxjs": "7.8.2",
     "typescript": "7.0.2"
   },
   "publishConfig": {

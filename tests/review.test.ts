@@ -293,3 +293,238 @@ test("grouped repeated-text edits retain exact live pointer coordinates through 
   e.Redo();
   assert.equal(pointer.Offset, 5);
 });
+
+test("tracked inline formatting rejects only its changed property after unrelated edits", () => {
+  const e = engine("abcdef");
+  e.TrackChanges = true;
+  e.CurrentAuthor = "Ada";
+  e.Select(1, 4);
+  e.ApplyProperty("FontWeight", "Bold");
+  const revision = e.Revisions[0]!;
+  assert.equal(revision.Kind, "Formatting");
+  e.TrackChanges = false;
+  e.Select(1, 4);
+  e.ApplyProperty("Foreground", "red");
+  e.Select(0);
+  e.InsertText("prefix ");
+  e.RejectRevision(revision.Id);
+  e.Select(8, 11);
+  assert.equal(e.GetProperty("FontWeight"), "Normal");
+  assert.equal(e.GetProperty("Foreground"), "red");
+  assert.equal(e.Document.Text, "prefix abcdef");
+  e.Undo();
+  e.Select(8, 11);
+  assert.equal(e.GetProperty("FontWeight"), "Bold");
+});
+test("format revision conflicts preserve later formatting and reject-all is atomic", () => {
+  const e = engine("abc");
+  e.TrackChanges = true;
+  e.Select(0, 3);
+  e.ApplyProperty("FontSize", 20);
+  const old = e.Revisions[0]!;
+  e.TrackChanges = false;
+  e.ApplyProperty("FontSize", 30);
+  e.TrackChanges = true;
+  e.Select(3);
+  e.InsertText("!");
+  const before = e.Document.ToJSON();
+  assert.throws(() => e.RejectRevision(old.Id), /conflict/i);
+  assert.throws(() => e.RejectAllRevisions(), /conflict/i);
+  assert.deepEqual(e.Document.ToJSON(), before);
+});
+test("paragraph and table property reviews preserve other live properties", () => {
+  const e = engine("abc"),
+    p = e.Document.Blocks.Get(0);
+  e.TrackChanges = true;
+  e.SetParagraphProperty("TextAlignment", "Center");
+  e.TrackChanges = false;
+  e.SetParagraphProperty("KeepWithNext", true);
+  e.RejectAllRevisions();
+  assert.equal(p.GetValue("TextAlignment"), "Left");
+  assert.equal(p.GetValue("KeepWithNext"), true);
+  e.TrackChanges = true;
+  e.Select(1);
+  e.InsertTable(2, 2);
+  assert.equal(e.Revisions[0]!.Kind, "TableStructure");
+  e.RejectAllRevisions();
+  assert.equal(e.Document.Text, "abc");
+});
+test("tracked rich text moves and stable block moves support reject undo and redo", () => {
+  const e = engine("one two three");
+  e.Select(4, 7);
+  e.ApplyProperty("FontWeight", "Bold");
+  e.TrackChanges = true;
+  e.MoveSelection(13);
+  assert.equal(e.Document.Text, "one  threetwo");
+  assert.equal(e.Revisions[0]!.Kind, "Move");
+  e.RejectAllRevisions();
+  assert.equal(e.Document.Text, "one two three");
+  e.Select(4, 7);
+  assert.equal(e.GetProperty("FontWeight"), "Bold");
+  const a = new Paragraph(new Run("a")),
+    b = new Paragraph(new Run("b")),
+    c = new Paragraph(new Run("c"));
+  const blocks = new RichTextEngine(new FlowDocument([a, b, c]));
+  blocks.TrackChanges = true;
+  blocks.MoveBlocks([a.Id], blocks.Document.Id, 3);
+  assert.equal(blocks.Document.Text, "b\nc\na");
+  assert.equal(blocks.Document.Blocks.Get(2), a);
+  blocks.RejectAllRevisions();
+  assert.equal(blocks.Document.Text, "a\nb\nc");
+  assert.equal(blocks.Document.Blocks.Get(0), a);
+  blocks.Undo();
+  assert.equal(blocks.Document.Text, "b\nc\na");
+  blocks.Redo();
+  assert.equal(blocks.Document.Text, "a\nb\nc");
+});
+test("table structural review allows unrelated cell text and refuses dependent edits", () => {
+  const table = new Table(
+    new TableRowGroup([
+      new TableRow([
+        new TableCell(new Paragraph(new Run("a"))),
+        new TableCell(new Paragraph(new Run("b"))),
+      ]),
+    ]),
+  );
+  const e = new RichTextEngine(new FlowDocument(table));
+  e.TrackChanges = true;
+  e.Select(0);
+  e.InsertTableRow();
+  const revision = e.Revisions[0]!;
+  e.TrackChanges = false;
+  e.Select(0);
+  e.InsertText("prefix ");
+  e.RejectRevision(revision.Id);
+  assert.equal(e.Document.Text, "prefix a\nb");
+  assert.equal(table.RowGroups.Get(0).Rows.Count, 1);
+  e.TrackChanges = true;
+  e.Select(0);
+  e.InsertTableRow();
+  const next = e.Revisions[0]!;
+  e.TrackChanges = false;
+  e.Select(e.Document.Text.length);
+  e.InsertText("content");
+  assert.throws(() => e.RejectRevision(next.Id), /patch|changed|matches/i);
+  assert(e.Document.Text.endsWith("content"));
+});
+test("merged table grid edits and split preserve geometry and can reject all revisions", () => {
+  const e = engine("");
+  e.InsertTable(3, 3);
+  const before = e.Document.ToJSON();
+  e.TrackChanges = true;
+  e.Select(0);
+  e.MergeTableCells(2);
+  e.InsertTableColumn();
+  e.InsertTableRow();
+  e.SplitTableCell();
+  e.DeleteTableColumn();
+  assert(e.Revisions.every((r) => r.Kind === "TableStructure"));
+  e.RejectAllRevisions();
+  assert.deepEqual(e.Document.ToJSON().children, before.children);
+});
+test("remote document changes preserve live nodes but clear stale local undo only after valid commit", () => {
+  const e = engine("abc"),
+    p = e.Document.Blocks.Get(0);
+  e.Select(1);
+  e.InsertText("X");
+  const next = e.Document.ToJSON();
+  next.children![0]!.children![0]!.text = "remote";
+  e.ApplyRemoteDocument(FlowDocument.FromJSON(next));
+  assert.equal(e.Document.Text, "remote");
+  assert.equal(e.Document.Blocks.Get(0), p);
+  assert.equal(e.CanUndo, false);
+});
+
+test("direct typing avoids document serialization and preserves observer-safe history", () => {
+  const editor = engine("a".repeat(100000)),
+    document = editor.Document,
+    original = document.ToJSON.bind(document);
+  editor.Select(50000);
+  document.ToJSON = () => {
+    throw new Error("whole-document serialization on typing path");
+  };
+  try {
+    editor.InsertText("X");
+  } finally {
+    document.ToJSON = original;
+  }
+  assert.equal(document.Text[50000], "X");
+  assert(editor.HistoryStatistics.RetainedBytes < 1600);
+  const observer = document.Changed.Subscribe(() => {
+    throw new Error("observer failed");
+  });
+  assert.throws(() => editor.InsertText("Y"), DocumentObserverError);
+  observer.Dispose();
+  assert.equal(document.Text.slice(50000, 50002), "XY");
+  editor.Undo();
+  assert.equal(document.Text.slice(50000, 50002), "Xa");
+});
+test("deleted table row restoration follows neighboring identities after an earlier row insertion", () => {
+  const editor = engine("");
+  editor.InsertTable(3, 1);
+  const table = editor.Document.Blocks.Get(0) as Table;
+  const rows = table.RowGroups.Get(0).Rows;
+  (rows.Get(0).Cells.Get(0).Blocks.Get(0) as Paragraph).Inlines.Add(
+    new Run("a"),
+  );
+  (rows.Get(1).Cells.Get(0).Blocks.Get(0) as Paragraph).Inlines.Add(
+    new Run("b"),
+  );
+  (rows.Get(2).Cells.Get(0).Blocks.Get(0) as Paragraph).Inlines.Add(
+    new Run("c"),
+  );
+  editor.TrackChanges = true;
+  editor.Select(2);
+  editor.DeleteTableRow();
+  const revision = editor.Revisions[0]!;
+  editor.TrackChanges = false;
+  editor.Select(0);
+  editor.InsertTableRow(true);
+  editor.RejectRevision(revision.Id);
+  assert.equal(editor.Document.Text, "\na\nb\nc");
+});
+
+test("vertical merged cells expand and migrate during row editing", () => {
+  const table = new Table(
+    new TableRowGroup([
+      new TableRow([
+        new TableCell(new Paragraph(new Run("span"))),
+        new TableCell(new Paragraph(new Run("b"))),
+      ]),
+      new TableRow(new TableCell(new Paragraph(new Run("d")))),
+    ]),
+  );
+  table.RowGroups.Get(0).Rows.Get(0).Cells.Get(0).RowSpan = 2;
+  const editor = new RichTextEngine(new FlowDocument(table));
+  editor.TrackChanges = true;
+  editor.Select(0);
+  editor.InsertTableRow();
+  assert.equal(table.RowGroups.Get(0).Rows.Get(0).Cells.Get(0).RowSpan, 3);
+  editor.DeleteTableRow();
+  assert.equal(table.RowGroups.Get(0).Rows.Get(0).Cells.Get(0).RowSpan, 2);
+  editor.RejectAllRevisions();
+  assert.equal(editor.Document.Text, "span\nb\nd");
+});
+test("Figure story editing retains main-story object offsets and is undoable and reviewable", async () => {
+  const { Figure } = await import("../src/model.js");
+  const figure = new Figure(new Paragraph(new Run("inside"))),
+    editor = new RichTextEngine(
+      new FlowDocument(
+        new Paragraph([new Run("before"), figure, new Run("after")]),
+      ),
+    );
+  editor.TrackChanges = true;
+  editor.EditFloatingContent(figure.Id, (story) => {
+    story.Select(0, 6);
+    story.ApplyProperty("FontWeight", "Bold");
+    story.Select(6);
+    story.InsertText(" story");
+  });
+  assert.equal(editor.Document.Text, "before\uFFFCafter");
+  assert.equal(figure.StoryText, "inside story");
+  assert.equal(editor.Revisions[0]!.Kind, "Structural");
+  editor.RejectAllRevisions();
+  assert.equal(figure.StoryText, "inside");
+  editor.Undo();
+  assert.equal(figure.StoryText, "inside story");
+});

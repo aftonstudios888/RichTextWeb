@@ -1,5 +1,5 @@
 import JSZip from "jszip";
-import { FlowDocument, type DocumentNode } from "./model.js";
+import { FlowDocument, elementFromJSON, type DocumentNode } from "./model.js";
 import {
   parseMarkup,
   child,
@@ -9,6 +9,7 @@ import {
   safeURL,
   type MarkupNode,
 } from "./formats-markup.js";
+const REVIEW_NS = "https://richtextweb.dev/schema/document-review/1";
 const NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const REL =
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -26,6 +27,7 @@ function parseOfficeXML(source: string): MarkupNode {
     "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing":
       "wp",
     "http://schemas.openxmlformats.org/drawingml/2006/picture": "pic",
+    "http://schemas.microsoft.com/office/word/2010/wordprocessingShape": "wps",
   };
   const visit = (n: MarkupNode, inherited: Record<string, string>) => {
     const namespaces = { ...inherited };
@@ -368,6 +370,49 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
   const reviews: any[] = Array.isArray(root.props.Annotations)
     ? root.props.Annotations
     : [];
+  const tableMarks = new Map<string, { revision: any; inserted: boolean }>();
+  const deletedTableChildren = new Map<
+    string,
+    { index: number; node: DocumentNode; revision: any }[]
+  >();
+  const scanStructuralReview = (change: any, revision: any) => {
+    if (change.Children) {
+      const removed: DocumentNode[] = change.Children.Removed ?? [],
+        inserted: DocumentNode[] = change.Children.Inserted ?? [];
+      const markTree = (node: DocumentNode, added: boolean) => {
+        if (["TableRow", "TableCell"].includes(node.type))
+          tableMarks.set(node.id, { revision, inserted: added });
+        for (const c of node.children ?? []) markTree(c, added);
+      };
+      // RestorePatch is the inverse edit: removed nodes are present insertions,
+      // inserted nodes are the original deleted content retained for review.
+      for (const node of removed)
+        if (!inserted.some((old) => old.id === node.id)) markTree(node, true);
+      inserted.forEach((node, at) => {
+        if (removed.some((current) => current.id === node.id)) return;
+        markTree(node, false);
+        if (["TableRow", "TableCell", "Table"].includes(node.type)) {
+          const list = deletedTableChildren.get(change.Id) ?? [];
+          list.push({ index: change.Children.Index + at, node, revision });
+          deletedTableChildren.set(change.Id, list);
+        }
+      });
+    }
+    for (const child of change.Descendants ?? [])
+      scanStructuralReview(child, revision);
+  };
+  for (const revision of reviews)
+    if (
+      revision.Kind === "TableStructure" &&
+      revision.Data?.RestorePatch?.Change
+    )
+      scanStructuralReview(revision.Data.RestorePatch.Change, revision);
+  const tableReviewChildren = (parent: DocumentNode): DocumentNode[] => {
+    const result = [...(parent.children ?? [])];
+    for (const item of deletedTableChildren.get(parent.id) ?? [])
+      result.splice(Math.min(item.index, result.length), 0, item.node);
+    return result;
+  };
   const events = new Map<number, (() => string)[]>();
   const event = (offset: number, emit: () => string) => {
     if (
@@ -412,6 +457,16 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
       );
       event(a.End, () => `<w:bookmarkEnd w:id="${index}"/>`);
     }
+    if (
+      a.Kind === "Move" &&
+      Number.isInteger(data.SourceStart) &&
+      Array.isArray(data.Nodes)
+    )
+      event(
+        data.SourceStart,
+        () =>
+          `<w:moveFrom w:id="${index}"${author}${date}>${deletedXML(data.Nodes)}</w:moveFrom>`,
+      );
     if (a.Kind === "Deletion")
       event(
         a.Start,
@@ -426,17 +481,53 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
     return list?.map((emit) => emit()).join("") ?? "";
   };
   const insertions = reviews.filter(
-    (a) => a.Kind === "Insertion" && a.End > a.Start,
+    (a) =>
+      (a.Kind === "Insertion" ||
+        (a.Kind === "Move" && Number.isInteger(a.Data?.SourceStart))) &&
+      a.End > a.Start,
   );
+  const formatting = reviews.filter(
+    (a) => a.Kind === "Formatting" && Array.isArray(a.Data?.PropertyChanges),
+  );
+  const revisionAttrs = (a: any) =>
+    ` w:id="${reviews.indexOf(a)}" w:author="${esc(a.Data?.Author ?? "")}"${a.Data?.CreatedAt ? ` w:date="${esc(a.Data.CreatedAt)}"` : ""}`;
+  const changedRunProperties = (
+    props: Record<string, any>,
+    offset: number,
+  ): string => {
+    const current = runProperties(props);
+    const applicable = formatting.filter((a) =>
+      a.Data.PropertyChanges.some(
+        (c: any) => c.Scope === "Inline" && c.Start <= offset && c.End > offset,
+      ),
+    );
+    if (!applicable.length || !reviewActive) return current;
+    const a = applicable.at(-1)!,
+      before = { ...props };
+    for (const change of a.Data.PropertyChanges)
+      if (
+        change.Scope === "Inline" &&
+        change.Start <= offset &&
+        change.End > offset
+      ) {
+        if (change.HadBefore) before[change.Name] = change.Before;
+        else delete before[change.Name];
+      }
+    return (current || "<w:rPr></w:rPr>").replace(
+      "</w:rPr>",
+      `<w:rPrChange${revisionAttrs(a)}>${runProperties(before) || "<w:rPr/>"}</w:rPrChange></w:rPr>`,
+    );
+  };
   const wrapInsertion = (xml: string, offset: number): string => {
     if (!reviewActive) return xml;
     const a = insertions.find((a) => a.Start <= offset && a.End > offset);
     if (!a) return xml;
-    return `<w:ins w:id="${reviews.indexOf(a)}" w:author="${esc(a.Data?.Author ?? "")}"${a.Data?.CreatedAt ? ` w:date="${esc(a.Data.CreatedAt)}"` : ""}>${xml}</w:ins>`;
+    const tag = a.Kind === "Move" ? "moveTo" : "ins";
+    return `<w:${tag}${revisionAttrs(a)}>${xml}</w:${tag}>`;
   };
   const rawRun = (text: string, props: Record<string, any>) =>
     "<w:r>" +
-    runProperties(props) +
+    changedRunProperties(props, exportOffset) +
     text
       .split(/(\n|\t)/)
       .map((t) =>
@@ -458,6 +549,11 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
         end,
         ...events.keys(),
         ...insertions.flatMap((a) => [a.Start, a.End]),
+        ...formatting.flatMap((a) =>
+          a.Data.PropertyChanges.filter(
+            (c: any) => c.Scope === "Inline",
+          ).flatMap((c: any) => [c.Start, c.End]),
+        ),
       ]),
     ]
       .filter((v) => v >= start && v <= end)
@@ -576,6 +672,54 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
         ? `<w:hyperlink r:id="${relationship("hyperlink", uri, true)}">${body}</w:hyperlink>`
         : body;
     }
+    if (["Figure", "Floater"].includes(n.type)) {
+      const prefix = emitMarkers(),
+        at = exportOffset;
+      if (reviewActive) exportOffset++;
+      const previousReview = reviewActive,
+        previousParagraphs = paragraphCount;
+      reviewActive = false;
+      const story = blocks(n.children ?? [], props) || "<w:p/>";
+      reviewActive = previousReview;
+      paragraphCount = previousParagraphs;
+      const pixels = (value: any, fallback: number, pageSize: number) => {
+        if (typeof value === "number" && Number.isFinite(value) && value > 0)
+          return value;
+        if (value && typeof value === "object" && Number(value.Value) > 0)
+          return ["Page", "Content", "Column"].includes(value.FigureUnitType)
+            ? Number(value.Value) * pageSize
+            : Number(value.Value);
+        return fallback;
+      };
+      const width = Math.round(
+          pixels(props.Width, 240, Number(root.props.PageWidth) || 816) * 9525,
+        ),
+        height = Math.round(
+          pixels(props.Height, 120, Number(root.props.PageHeight) || 1056) *
+            9525,
+        ),
+        id = ++imageId,
+        horizontal = String(props.HorizontalAnchor ?? "ContentLeft"),
+        vertical = String(props.VerticalAnchor ?? "ParagraphTop"),
+        hRelative = horizontal.startsWith("Page") ? "page" : "column",
+        vRelative = vertical.startsWith("Page")
+          ? "page"
+          : vertical.startsWith("Content")
+            ? "margin"
+            : "paragraph",
+        hPosition = props.HorizontalOffset
+          ? `<wp:posOffset>${Math.round(Number(props.HorizontalOffset) * 9525)}</wp:posOffset>`
+          : `<wp:align>${horizontal.endsWith("Right") ? "right" : horizontal.endsWith("Center") ? "center" : "left"}</wp:align>`,
+        vPosition = props.VerticalOffset
+          ? `<wp:posOffset>${Math.round(Number(props.VerticalOffset) * 9525)}</wp:posOffset>`
+          : `<wp:align>${vertical.endsWith("Bottom") ? "bottom" : vertical.endsWith("Center") ? "center" : "top"}</wp:align>`,
+        wrap =
+          props.WrapDirection === "None"
+            ? "<wp:wrapNone/>"
+            : `<wp:wrapSquare wrapText="${props.WrapDirection === "Left" ? "left" : props.WrapDirection === "Right" ? "right" : "bothSides"}"/>`;
+      const drawing = `<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="91440" distR="91440" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="${hRelative}">${hPosition}</wp:positionH><wp:positionV relativeFrom="${vRelative}">${vPosition}</wp:positionV><wp:extent cx="${width}" cy="${height}"/>${wrap}<wp:docPr id="${id}" name="${n.type} text box ${id}"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${width}" cy="${height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>${story}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+      return prefix + wrapInsertion(drawing, at) + emitMarkers();
+    }
     if (n.type === "Image") {
       const imageMarkers = emitMarkers(),
         imageOffset = exportOffset;
@@ -633,6 +777,32 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
       pPr += `<w:spacing w:before="${pxToTwip(props.Margin.Top)}" w:after="${pxToTwip(props.Margin.Bottom)}"/><w:ind w:left="${pxToTwip(props.Margin.Left)}" w:right="${pxToTwip(props.Margin.Right)}"/>`;
     if (num)
       pPr += `<w:numPr><w:ilvl w:val="${level}"/><w:numId w:val="${num}"/></w:numPr>`;
+    const formatRevision =
+      reviewActive &&
+      [...formatting]
+        .reverse()
+        .find((a) =>
+          a.Data.PropertyChanges.some(
+            (c: any) => c.Scope === "Node" && c.NodeId === n.id,
+          ),
+        );
+    if (formatRevision) {
+      const before = { ...props };
+      for (const change of formatRevision.Data.PropertyChanges)
+        if (change.NodeId === n.id) {
+          if (change.HadBefore) before[change.Name] = change.Before;
+          else delete before[change.Name];
+        }
+      let old = "";
+      if (before.TextAlignment)
+        old += `<w:jc w:val="${esc(String(before.TextAlignment).toLowerCase().replace("justify", "both"))}"/>`;
+      if (before.KeepTogether) old += "<w:keepLines/>";
+      if (before.KeepWithNext) old += "<w:keepNext/>";
+      if (before.BreakPageBefore) old += "<w:pageBreakBefore/>";
+      if (before.HeadingLevel)
+        old += `<w:pStyle w:val="Heading${before.HeadingLevel}"/>`;
+      pPr += `<w:pPrChange${revisionAttrs(formatRevision)}><w:pPr>${old}</w:pPr></w:pPrChange>`;
+    }
     return (
       "<w:p>" +
       (pPr ? "<w:pPr>" + pPr + "</w:pPr>" : "") +
@@ -737,15 +907,16 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
           const rows: DocumentNode[] = [];
           const gather = (n: DocumentNode) => {
             if (n.type === "TableRow") rows.push(n);
-            else for (const c of n.children ?? []) gather(c);
+            else for (const c of tableReviewChildren(n)) gather(c);
           };
           gather(n);
           let columns = 1;
           const active = new Map<number, { remaining: number; span: number }>();
           const rowXML = rows
             .map((row) => {
-              const cells = row.children ?? [],
+              const cells = tableReviewChildren(row),
                 fragments: string[] = [];
+              const rowMark = tableMarks.get(row.id);
               let column = 0,
                 index = 0;
               while (
@@ -773,16 +944,46 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
                 }
                 const span = Math.max(1, Number(cell.props.ColumnSpan) || 1),
                   rowSpan = Math.max(1, Number(cell.props.RowSpan) || 1);
+                const cellMark = tableMarks.get(cell.id),
+                  mark = cellMark ?? rowMark;
+                const previousReview = reviewActive;
+                if (mark && !mark.inserted) reviewActive = false;
+                let cellBody =
+                  blocks(cell.children ?? [], { ...props, ...cell.props }) ||
+                  "<w:p/>";
+                reviewActive = previousReview;
+                if (mark && !mark.inserted) {
+                  const tree = parseOfficeXML(cellBody);
+                  for (const paragraph of descendants(tree, "w:p")) {
+                    const content = paragraph.children.filter(
+                      (c) => c.name !== "w:pPr",
+                    );
+                    for (const text of content.flatMap((c) =>
+                      descendants(c, "w:t"),
+                    ))
+                      text.name = "w:delText";
+                    const wrapper = parseOfficeXML(
+                      `<w:del${revisionAttrs(mark.revision)}>${content.map(officeMarkup).join("")}</w:del>`,
+                    ).children[0]!;
+                    paragraph.children = [
+                      ...paragraph.children.filter((c) => c.name === "w:pPr"),
+                      wrapper,
+                    ];
+                  }
+                  cellBody = officeMarkup(tree);
+                }
                 fragments.push(
                   "<w:tc><w:tcPr>" +
+                    (cellMark
+                      ? `<w:${cellMark.inserted ? "cellIns" : "cellDel"}${revisionAttrs(cellMark.revision)}/>`
+                      : "") +
                     (span > 1 ? `<w:gridSpan w:val="${span}"/>` : "") +
                     (rowSpan > 1 ? '<w:vMerge w:val="restart"/>' : "") +
                     (hexColor(cell.props.Background)
                       ? `<w:shd w:fill="${hexColor(cell.props.Background)}"/>`
                       : "") +
                     "</w:tcPr>" +
-                    (blocks(cell.children ?? [], { ...props, ...cell.props }) ||
-                      "<w:p/>") +
+                    cellBody +
                     ((cell.children ?? []).at(-1)?.type === "Table"
                       ? "<w:p/>"
                       : "") +
@@ -793,7 +994,14 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
                 column += span;
               }
               columns = Math.max(columns, column);
-              return "<w:tr>" + fragments.join("") + "</w:tr>";
+              return (
+                "<w:tr>" +
+                (rowMark
+                  ? `<w:trPr><w:${rowMark.inserted ? "ins" : "del"}${revisionAttrs(rowMark.revision)}/></w:trPr>`
+                  : "") +
+                fragments.join("") +
+                "</w:tr>"
+              );
             })
             .join("");
           return (
@@ -868,7 +1076,7 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
       : "";
     return `<w:sectPr>${refs}${p.SectionBreak ? `<w:type w:val="${esc(p.SectionBreak)}"/>` : ""}<w:pgSz w:w="${pxToTwip(p.PageWidth || 816)}" w:h="${pxToTwip(p.PageHeight || 1056)}"${p.PageOrientation ? ` w:orient="${esc(String(p.PageOrientation).toLowerCase())}"` : ""}/><w:pgMar w:top="${pxToTwip(margins.Top)}" w:right="${pxToTwip(margins.Right)}" w:bottom="${pxToTwip(margins.Bottom)}" w:left="${pxToTwip(margins.Left)}" w:header="${pxToTwip(p.HeaderDistance ?? 48)}" w:footer="${pxToTwip(p.FooterDistance ?? 48)}" w:gutter="${pxToTwip(p.Gutter ?? 0)}"/><w:cols w:num="${Math.max(1, Number(p.ColumnCount) || 1)}" w:space="${pxToTwip(p.ColumnGap ?? 24)}"${columnWidths ? ' w:equalWidth="0"' : ""}>${columnWidths}</w:cols>${p.FirstPageHeader || p.FirstPageFooter ? "<w:titlePg/>" : ""}${p.PageNumberStart ? `<w:pgNumType w:start="${Number(p.PageNumberStart)}"/>` : ""}</w:sectPr>`;
   };
-  const content = blocks(root.children ?? [], root.props),
+  const content = blocks(tableReviewChildren(root), root.props),
     sectPr = sectionProperties(root.props);
   reviewActive = false;
   for (const kind of ["Footnote", "Endnote"]) {
@@ -973,6 +1181,21 @@ export async function toDOCX(document: FlowDocument): Promise<Uint8Array> {
     "word/document.xml",
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="${NS}" xmlns:r="${REL}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${content}${sectPr}</w:body></w:document>`,
   );
+  if (
+    (reviews.some((a) =>
+      ["Formatting", "Move", "TableStructure", "Structural"].includes(a.Kind),
+    ) ||
+      hasFloatingStory(root)) &&
+    globalThis.crypto?.subtle
+  ) {
+    const mainXML = await zip.file("word/document.xml")!.async("string");
+    const digest = await mainPartDigest(mainXML);
+    relationship("customXml", "../customXml/richtextweb-review.xml");
+    zip.file(
+      "customXml/richtextweb-review.xml",
+      `<rtw:review xmlns:rtw="${REVIEW_NS}" version="1" mainSha256="${digest}"><rtw:document>${esc(JSON.stringify(root))}</rtw:document></rtw:review>`,
+    );
+  }
   relationship("styles", "styles.xml");
   zip.file(
     "word/styles.xml",
@@ -1320,11 +1543,40 @@ export async function fromDOCX(
     inherited: Record<string, any> = {},
   ): DocumentNode[] =>
     nodes.flatMap((n) => {
-      if (n.name === "w:r")
-        return inlines(
+      if (n.name === "w:r") {
+        const pr = child(n, "w:rPr"),
+          current = { ...inherited, ...runProps(pr) },
+          start = importOffset;
+        const result = inlines(
           n.children.filter((c) => c.name !== "w:rPr"),
-          { ...inherited, ...runProps(child(n, "w:rPr")) },
+          current,
         );
+        const changed = child(pr, "w:rPrChange");
+        if (recordReview && changed && importOffset > start) {
+          const before = { ...inherited, ...runProps(child(changed, "w:rPr")) };
+          const changes = nativePropertyChanges(before, current).map((c) => ({
+            ...c,
+            Scope: "Inline",
+            Start: start,
+            End: importOffset,
+          }));
+          if (changes.length)
+            annotations.push({
+              Id: "docx-format-" + ++id,
+              Kind: "Formatting",
+              Start: start,
+              End: importOffset,
+              Data: {
+                Author: changed.attrs["w:author"] ?? "",
+                CreatedAt: changed.attrs["w:date"] ?? "",
+                DocxId: changed.attrs["w:id"],
+                Operation: "ApplyProperty",
+                PropertyChanges: changes,
+              },
+            });
+        }
+        return result;
+      }
       if (n.name === "w:t" || n.name === "w:delText")
         return [readText(textContent(n), inherited)];
       if (n.name === "w:tab") return [readText("\t", inherited)];
@@ -1360,7 +1612,7 @@ export async function fromDOCX(
           }),
         ];
       }
-      if (n.name === "w:ins") {
+      if (n.name === "w:ins" || n.name === "w:moveTo") {
         const start = importOffset,
           children = inlines(n.children, inherited);
         if (recordReview)
@@ -1373,11 +1625,12 @@ export async function fromDOCX(
               Author: n.attrs["w:author"] ?? "",
               CreatedAt: n.attrs["w:date"] ?? "",
               DocxId: n.attrs["w:id"],
+              ...(n.name === "w:moveTo" ? { MoveRole: "To" } : {}),
             },
           });
         return children;
       }
-      if (n.name === "w:del") {
+      if (n.name === "w:del" || n.name === "w:moveFrom") {
         const start = importOffset,
           oldRecord = recordReview;
         recordReview = false;
@@ -1400,6 +1653,7 @@ export async function fromDOCX(
               Text: text,
               Nodes: [fragment],
               DocxId: n.attrs["w:id"],
+              ...(n.name === "w:moveFrom" ? { MoveRole: "From" } : {}),
             },
           });
         return [];
@@ -1494,6 +1748,99 @@ export async function fromDOCX(
         return opaque ? [opaque] : [];
       }
       if (n.name === "w:drawing") {
+        const textbox = descendants(n, "w:txbxContent")[0];
+        if (textbox) {
+          const oldOffset = importOffset,
+            oldParagraphs = importParagraphs,
+            oldReview = recordReview;
+          importOffset = 0;
+          importParagraphs = 0;
+          recordReview = false;
+          const content = convertBlocks(textbox.children);
+          importOffset = oldOffset + 1;
+          importParagraphs = oldParagraphs;
+          recordReview = oldReview;
+          const extent = descendants(n, "wp:extent")[0],
+            horizontal = descendants(n, "wp:positionH")[0],
+            vertical = descendants(n, "wp:positionV")[0],
+            alignH = textContent(
+              child(horizontal, "wp:align") ?? {
+                name: "#text",
+                attrs: {},
+                children: [],
+                text: "left",
+              },
+            ),
+            alignV = textContent(
+              child(vertical, "wp:align") ?? {
+                name: "#text",
+                attrs: {},
+                children: [],
+                text: "top",
+              },
+            ),
+            wrap = descendants(n, "wp:wrapSquare")[0]?.attrs.wrapText,
+            kind = descendants(n, "wp:docPr")[0]?.attrs.name?.startsWith(
+              "Floater",
+            )
+              ? "Floater"
+              : "Figure";
+          return [
+            node(kind, content, {
+              Width: Number(extent?.attrs.cx || 2286000) / 9525,
+              Height: Number(extent?.attrs.cy || 1143000) / 9525,
+              HorizontalAnchor:
+                (horizontal?.attrs.relativeFrom === "page"
+                  ? "Page"
+                  : "Content") +
+                (alignH === "right"
+                  ? "Right"
+                  : alignH === "center"
+                    ? "Center"
+                    : "Left"),
+              VerticalAnchor:
+                (vertical?.attrs.relativeFrom === "page"
+                  ? "Page"
+                  : vertical?.attrs.relativeFrom === "margin"
+                    ? "Content"
+                    : "Paragraph") +
+                (alignV === "bottom"
+                  ? "Bottom"
+                  : alignV === "center"
+                    ? "Center"
+                    : "Top"),
+              HorizontalOffset:
+                Number(
+                  textContent(
+                    child(horizontal, "wp:posOffset") ?? {
+                      name: "#text",
+                      attrs: {},
+                      children: [],
+                      text: "0",
+                    },
+                  ),
+                ) / 9525,
+              VerticalOffset:
+                Number(
+                  textContent(
+                    child(vertical, "wp:posOffset") ?? {
+                      name: "#text",
+                      attrs: {},
+                      children: [],
+                      text: "0",
+                    },
+                  ),
+                ) / 9525,
+              WrapDirection: descendants(n, "wp:wrapNone").length
+                ? "None"
+                : wrap === "left"
+                  ? "Left"
+                  : wrap === "right"
+                    ? "Right"
+                    : "Both",
+            }),
+          ];
+        }
         const blip = descendants(n, "a:blip")[0],
           src = images.get(blip?.attrs["r:embed"] ?? ""),
           extent = descendants(n, "wp:extent")[0],
@@ -1561,6 +1908,34 @@ export async function fromDOCX(
       StartIndex: Number(val(child(lvl, "w:start"))) || 1,
     };
   };
+  const nativeStructureRevision = (
+    mark: MarkupNode,
+    operation: string,
+    parentId: string,
+    index: number,
+    removed: DocumentNode[],
+    inserted: DocumentNode[],
+    at: number,
+  ) => ({
+    Id: "docx-table-" + ++id,
+    Kind: "TableStructure",
+    Start: at,
+    End: at,
+    Data: {
+      Author: mark.attrs["w:author"] ?? "",
+      CreatedAt: mark.attrs["w:date"] ?? "",
+      DocxId: mark.attrs["w:id"],
+      Operation: operation,
+      StructureChanges: [
+        {
+          ParentId: parentId,
+          Index: index,
+          Removed: removed,
+          Inserted: inserted,
+        },
+      ],
+    },
+  });
   const convertBlocks = (children: MarkupNode[]): DocumentNode[] => {
     const result: DocumentNode[] = [],
       sections: DocumentNode[] = [];
@@ -1600,6 +1975,31 @@ export async function fromDOCX(
           ),
           numPr = child(pr, "w:numPr"),
           numId = val(child(numPr, "w:numId"));
+        const changed = child(pr, "w:pPrChange");
+        if (recordReview && changed) {
+          const before = paragraphProps(child(changed, "w:pPr")),
+            changes = nativePropertyChanges(before, props).map((c) => ({
+              ...c,
+              Scope: "Node",
+              NodeId: para.id,
+            }));
+          if (changes.length)
+            annotations.push({
+              Id: "docx-format-" + ++id,
+              Kind: "Formatting",
+              Start:
+                importOffset -
+                FlowDocument.FromJSON(node("FlowDocument", [para])).Text.length,
+              End: importOffset,
+              Data: {
+                Author: changed.attrs["w:author"] ?? "",
+                CreatedAt: changed.attrs["w:date"] ?? "",
+                DocxId: changed.attrs["w:id"],
+                Operation: "SetParagraphProperty",
+                PropertyChanges: changes,
+              },
+            });
+        }
         if (numId && numId !== "0") {
           const level = Math.max(
             0,
@@ -1635,35 +2035,89 @@ export async function fromDOCX(
         }
       } else if (n.name === "w:tbl") {
         listStack.length = 0;
-        const active = new Map<number, DocumentNode>();
-        const rows = n.children
-          .filter((c) => c.name === "w:tr")
-          .map((row) => {
-            let column = 0;
-            const cells: DocumentNode[] = [],
-              touched = new Set<number>();
-            for (const cell of row.children.filter((c) => c.name === "w:tc")) {
-              const pr = child(cell, "w:tcPr"),
-                span = Math.max(1, Number(val(child(pr, "w:gridSpan"))) || 1),
-                merge = child(pr, "w:vMerge"),
-                existing = active.get(column);
-              if (merge && val(merge) !== "restart" && existing) {
-                existing.props.RowSpan =
-                  (Number(existing.props.RowSpan) || 1) + 1;
-                touched.add(column);
-                column += span;
-                continue;
-              }
-              const props: Record<string, any> = { ColumnSpan: span };
-              const fill = child(pr, "w:shd")?.attrs["w:fill"];
-              if (/^[a-f0-9]{6}$/i.test(fill ?? ""))
-                props.Background = "#" + fill;
-              const imported = node(
-                "TableCell",
-                convertBlocks(cell.children),
-                props,
-              );
+        const active = new Map<number, DocumentNode>(),
+          group = node("TableRowGroup"),
+          table = node("Table", [group]);
+        group.children = [];
+        for (const row of n.children.filter((c) => c.name === "w:tr")) {
+          const rowPr = child(row, "w:trPr"),
+            rowDelete = child(rowPr, "w:del"),
+            rowInsert = child(rowPr, "w:ins"),
+            initialOffset = importOffset,
+            initialParagraphs = importParagraphs,
+            outerReview = recordReview,
+            annotationIndex = annotations.length,
+            importedRow = node("TableRow"),
+            cells: DocumentNode[] = [],
+            touched = new Set<number>();
+          let column = 0;
+          if (rowDelete) recordReview = false;
+          importedRow.children = cells;
+          for (const cell of row.children.filter((c) => c.name === "w:tc")) {
+            const pr = child(cell, "w:tcPr"),
+              span = Math.max(1, Number(val(child(pr, "w:gridSpan"))) || 1),
+              merge = child(pr, "w:vMerge"),
+              existing = active.get(column),
+              cellDelete = child(pr, "w:cellDel"),
+              cellInsert = child(pr, "w:cellIns");
+            if (
+              merge &&
+              val(merge) !== "restart" &&
+              existing &&
+              !rowDelete &&
+              !cellDelete
+            ) {
+              existing.props.RowSpan =
+                (Number(existing.props.RowSpan) || 1) + 1;
+              touched.add(column);
+              column += span;
+              continue;
+            }
+            const props: Record<string, any> = { ColumnSpan: span };
+            const fill = child(pr, "w:shd")?.attrs["w:fill"];
+            if (/^[a-f0-9]{6}$/i.test(fill ?? ""))
+              props.Background = "#" + fill;
+            const oldOffset = importOffset,
+              oldParagraphs = importParagraphs,
+              oldReview = recordReview;
+            if (cellDelete || rowDelete) recordReview = false;
+            const content =
+              cellDelete || rowDelete
+                ? restoreDeletedMarkup(cell.children)
+                : cell.children;
+            const imported = node("TableCell", convertBlocks(content), props);
+            recordReview = oldReview;
+            if (cellDelete && !rowDelete) {
+              importOffset = oldOffset;
+              importParagraphs = oldParagraphs;
+              if (recordReview)
+                annotations.push(
+                  nativeStructureRevision(
+                    cellDelete,
+                    "DeleteTableColumn",
+                    importedRow.id,
+                    cells.length,
+                    [],
+                    [imported],
+                    oldOffset,
+                  ),
+                );
+            } else {
               cells.push(imported);
+              if (cellInsert && recordReview && !rowInsert)
+                annotations.push(
+                  nativeStructureRevision(
+                    cellInsert,
+                    "InsertTableColumn",
+                    importedRow.id,
+                    cells.length - 1,
+                    [imported],
+                    [],
+                    oldOffset,
+                  ),
+                );
+            }
+            if (!rowDelete && !cellDelete) {
               if (merge && val(merge) === "restart") {
                 props.RowSpan = 1;
                 active.set(column, imported);
@@ -1671,11 +2125,46 @@ export async function fromDOCX(
               } else active.delete(column);
               column += span;
             }
+          }
+          recordReview = outerReview;
+          if (rowDelete) {
+            importOffset = initialOffset;
+            importParagraphs = initialParagraphs;
+            if (recordReview)
+              annotations.splice(
+                annotationIndex,
+                0,
+                nativeStructureRevision(
+                  rowDelete,
+                  "DeleteTableRow",
+                  group.id,
+                  group.children.length,
+                  [],
+                  [importedRow],
+                  initialOffset,
+                ),
+              );
+          } else {
             for (const key of active.keys())
               if (!touched.has(key)) active.delete(key);
-            return node("TableRow", cells);
-          });
-        result.push(node("Table", [node("TableRowGroup", rows)]));
+            group.children.push(importedRow);
+            if (rowInsert && recordReview)
+              annotations.splice(
+                annotationIndex,
+                0,
+                nativeStructureRevision(
+                  rowInsert,
+                  "InsertTableRow",
+                  group.id,
+                  group.children.length - 1,
+                  [importedRow],
+                  [],
+                  initialOffset,
+                ),
+              );
+          }
+        }
+        result.push(table);
       } else if (["w:sdt", "w:sdtContent", "w:ins"].includes(n.name))
         result.push(...convertBlocks(n.children));
     }
@@ -1940,7 +2429,103 @@ export async function fromDOCX(
       if (previous) previous.End = annotation.End;
       else merged.push(annotation);
     }
+    for (const target of merged.filter((a) => a.Data.MoveRole === "To")) {
+      const source = merged.find(
+        (a) =>
+          a.Data.MoveRole === "From" && a.Data.DocxId === target.Data.DocxId,
+      );
+      if (source) {
+        target.Kind = "Move";
+        target.Data = {
+          ...target.Data,
+          SourceStart: source.Start,
+          Nodes: source.Data.Nodes,
+          Text: source.Data.Text,
+          Operation: "MoveSelection",
+        };
+        merged.splice(merged.indexOf(source), 1);
+      }
+    }
+    for (const annotation of merged)
+      for (const change of annotation.Data?.StructureChanges ?? []) {
+        change.Removed = (change.Removed ?? []).map((n: DocumentNode) =>
+          elementFromJSON(n).ToJSON(),
+        );
+        change.Inserted = (change.Inserted ?? []).map((n: DocumentNode) =>
+          elementFromJSON(n).ToJSON(),
+        );
+      }
     defaults.Annotations = merged;
   }
+  const extensionRel = relationshipNodes.find(
+    (r) =>
+      r.attrs.Type?.endsWith("/customXml") &&
+      r.attrs.TargetMode !== "External" &&
+      r.attrs.Target?.endsWith("richtextweb-review.xml"),
+  );
+  if (extensionRel && globalThis.crypto?.subtle) {
+    const extension = parseOfficeXML(
+      await read(resolve(extensionRel.attrs.Target!)),
+    );
+    const review = extension.children.find(
+      (n) => n.name === "rtw:review" && n.attrs["xmlns:rtw"] === REVIEW_NS,
+    );
+    if (
+      review?.attrs.version === "1" &&
+      review.attrs.mainSha256 === (await mainPartDigest(main))
+    ) {
+      const payload = review.children.find((n) => n.name === "rtw:document");
+      if (payload) {
+        try {
+          return FlowDocument.FromJSON(JSON.parse(textContent(payload)));
+        } catch {
+          /* Invalid optional review metadata must not prevent native document import. */
+        }
+      }
+    }
+  }
   return FlowDocument.FromJSON(node("FlowDocument", documentBlocks, defaults));
+}
+
+async function mainPartDigest(source: string): Promise<string> {
+  const bytes = new TextEncoder().encode(source);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+function nativePropertyChanges(
+  before: Record<string, any>,
+  after: Record<string, any>,
+) {
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter(
+      (name) => JSON.stringify(before[name]) !== JSON.stringify(after[name]),
+    )
+    .map((Name) => ({
+      Name,
+      HadBefore: Object.hasOwn(before, Name),
+      HasAfter: Object.hasOwn(after, Name),
+      ...(Object.hasOwn(before, Name) ? { Before: before[Name] } : {}),
+      ...(Object.hasOwn(after, Name) ? { After: after[Name] } : {}),
+    }));
+}
+
+function hasFloatingStory(node: DocumentNode): boolean {
+  return (
+    ["Figure", "Floater"].includes(node.type) ||
+    (node.children ?? []).some(hasFloatingStory)
+  );
+}
+
+function restoreDeletedMarkup(nodes: MarkupNode[]): MarkupNode[] {
+  const copy = structuredClone(nodes);
+  const visit = (node: MarkupNode) => {
+    if (node.name === "w:del" || node.name === "w:moveFrom")
+      node.name = "w:ins";
+    node.children.forEach(visit);
+  };
+  copy.forEach(visit);
+  return copy;
 }

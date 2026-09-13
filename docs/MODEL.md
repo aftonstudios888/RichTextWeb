@@ -150,3 +150,9 @@ while (position) {
 ## Scope
 
 This model is the shared foundation for editing, HTML/Markdown/DOCX conversion and browser controls. It does not itself paginate, shape glyphs, resolve native fonts, render arbitrary WPF controls, execute hyperlinks, import binary Word formats or edit arbitrary existing PDF content. Format and rendering support are described in the relevant modules. Unsupported element types fail explicitly.
+
+## Dependency properties and floating stories
+
+The expanded property system supports owner-aware metadata, inherited value notifications, read-only keys, coercion, local/current values, style/trigger setters and value-source inspection. See [property-system semantics and examples](WPF-PROPERTY-SYSTEM.md) before porting framework property behavior.
+
+`Figure` and `Floater` contain independently editable rich block stories and occupy one U+FFFC object position in the main text story. `FigureLength` retains pixel/auto/content/page/column units. Use the shared engine's `EditFloatingContent` transaction to preserve history and review. See [floating interchange](FLOATING-FORMATS.md) and [control layout](CONTROL.md).

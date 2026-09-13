@@ -1,10 +1,13 @@
 import * as RT from "../src/index.ts";
+import { createWordWorkspace } from "./word-workspace.js";
 import { openPDFTools } from "./pdf-tools.js";
 import { openCollaborationDemo } from "./collaboration-demo.js";
 const $ = (id) => document.getElementById(id);
 RT.registerRichTextWeb?.();
 RT.registerRichTextToolbar?.();
 const editor = $("editor");
+let wordWorkspace;
+let lastOutlineDocument, lastOutlineRevision;
 let tab = "home",
   panel = "document",
   sourceFormat = "markdown",
@@ -278,7 +281,15 @@ function update() {
     ? `${size} characters selected`
     : `${text.length.toLocaleString()} characters`;
   $("editor-mode").textContent = editor.IsReadOnly ? "Read only" : "Editing";
-  outline();
+  if (
+    lastOutlineDocument !== editor.Document ||
+    lastOutlineRevision !== editor.Document.Revision
+  ) {
+    outline();
+    lastOutlineDocument = editor.Document;
+    lastOutlineRevision = editor.Document.Revision;
+  }
+  wordWorkspace?.Refresh();
   if (panel === "document") updateStats();
   updateReadOnlyControls();
 }
@@ -295,188 +306,8 @@ function updateStats() {
   if ($("stat-revision"))
     $("stat-revision").textContent = editor.Document.Revision;
 }
-function tool(label, command, glyph = "", large = false, title = label) {
-  return `<button class="tool${large ? " large" : ""}" data-command="${command}" title="${esc(title)}" aria-label="${esc(label)}">${glyph ? `<span class="glyph">${glyph}</span>` : ""}<span>${label}</span></button>`;
-}
-function group(name, content) {
-  return `<div class="ribbon-group"><div class="ribbon-content">${content}</div><div class="ribbon-label">${name}</div></div>`;
-}
-const row = (html) => `<div class="ribbon-row">${html}</div>`,
-  stack = (html) => `<div class="ribbon-stack">${html}</div>`;
 function renderRibbon() {
-  if (tab === "home" || tab === "advanced") {
-    const toolbar = document.createElement("rich-text-toolbar");
-    toolbar.Editor = editor;
-    toolbar.Mode = tab === "home" ? "home" : "all";
-    toolbar.addEventListener("previewrequest", openPagePreview);
-    toolbar.addEventListener("documentsgenerated", (event) =>
-      event.detail.documents.forEach((doc, index) =>
-        download(
-          JSON.stringify(doc.ToJSON(), null, 2),
-          `merged-${index + 1}.json`,
-          "application/json",
-        ),
-      ),
-    );
-    toolbar.addEventListener("commanderror", (event) =>
-      toast(event.detail.error.message),
-    );
-    $("ribbon").replaceChildren(toolbar);
-    update();
-    return;
-  }
-  let html = "";
-  if (tab === "file")
-    html =
-      group(
-        "Document",
-        tool("New", "new", "▱", true) +
-          tool("Open", "open", "▣", true) +
-          tool("Save", "save", "↓", true),
-      ) +
-      group(
-        "Export",
-        tool("Word", "export-docx", "W", true) +
-          tool("PDF", "export-pdf", "▤", true) +
-          tool("Markdown", "export-markdown", "M↓", true) +
-          tool("HTML", "export-html", "⌘", true) +
-          tool("Rich text", "export-rtf", "¶", true) +
-          tool("JSON", "export-json", "{}", true),
-      ) +
-      group(
-        "Output",
-        tool("Print", "print", "▧", true) +
-          tool("PDF tools", "pdf-tools", "▤", true),
-      );
-  else if (tab === "insert")
-    html =
-      group(
-        "Structure",
-        tool("Table", "table", "▦", true) +
-          tool("Image", "image", "▧", true) +
-          tool("Link", "link", "↗", true) +
-          tool("Page break", "page-break", "▱", true),
-      ) +
-      group(
-        "Edit table",
-        stack(
-          row(
-            tool("Row above", "table-row-before") +
-              tool("Row below", "table-row-after") +
-              tool("Delete row", "table-row-delete"),
-          ) +
-            row(
-              tool("Column left", "table-column-before") +
-                tool("Column right", "table-column-after") +
-                tool("Delete column", "table-column-delete"),
-            ),
-        ),
-      ) +
-      group(
-        "Text",
-        tool("Date", "date", "▦", true) +
-          tool("Symbol", "symbol", "Ω", true) +
-          tool("Code", "code", "</>", true),
-      ) +
-      group(
-        "Review",
-        tool("Comment", "comment", "▤", true) +
-          tool("Bookmark", "bookmark", "⚑", true),
-      );
-  else if (tab === "layout")
-    html =
-      group(
-        "Page setup",
-        tool("A4", "a4", "▯", true) +
-          tool("Letter", "letter", "▯", true) +
-          tool("Landscape", "landscape", "▭", true) +
-          tool("Margins", "margins", "⊞", true),
-      ) +
-      group(
-        "Paragraph",
-        tool("Spacing", "spacing", "↕", true) +
-          tool("Indent", "indent", "⇥", true) +
-          tool("Outdent", "outdent", "⇤", true),
-      ) +
-      group(
-        "Layout",
-        tool("Page", "page", "▣", true) +
-          tool("Continuous", "continuous", "☷", true),
-      );
-  else if (tab === "review")
-    html =
-      group(
-        "Comments & bookmarks",
-        tool("New comment", "comment", "▤", true) +
-          tool("Show comments", "comments", "☷", true) +
-          tool("Bookmark", "bookmark", "⚑", true),
-      ) +
-      group(
-        "Review",
-        tool("Read only", "read-only", "◉", true) +
-          tool("Spell check", "spellcheck", "ABC", true) +
-          tool("Find & replace", "find", "⌕", true),
-      ) +
-      group("Statistics", tool("Document stats", "properties", "▥", true));
-  else if (tab === "view")
-    html =
-      group(
-        "Document views",
-        tool("Print layout", "page", "▣", true) +
-          tool("Continuous", "continuous", "☷", true) +
-          tool("Focus", "focus", "⛶", true),
-      ) +
-      group(
-        "Panes",
-        tool("Navigation", "navigation", "☰", true) +
-          tool("Properties", "properties", "☷", true) +
-          tool("Source", "source", "</>", true),
-      ) +
-      group(
-        "Display",
-        tool("100%", "zoom-reset", "⊙", true) +
-          tool("Theme", "theme", "◐", true),
-      );
-  else
-    html =
-      group(
-        "Document model",
-        tool("JSON", "source-json", "{}", true) +
-          tool("XAML", "source-xaml", "<>", true) +
-          tool("HTML", "source-html", "⌘", true) +
-          tool("Markdown", "source-markdown", "M↓", true),
-      ) +
-      group(
-        "Integration",
-        tool("API example", "api-example", "</>", true) +
-          tool("MVVM", "mvvm-example", "⇄", true) +
-          tool("React", "react-example", "⚛", true) +
-          tool("WebView bridge", "bridge-example", "▣", true) +
-          tool("Coauthor demo", "collaboration-demo", "⇄", true),
-      ) +
-      group("Performance", tool("Large document", "large-document", "▥", true));
-  $("ribbon").innerHTML = html;
-  $("ribbon")
-    .querySelectorAll("[data-command]")
-    .forEach((b) => {
-      b.onmousedown = (e) => e.preventDefault();
-      b.onclick = () => run(b.dataset.command);
-    });
-  if ($("font-family"))
-    $("font-family").onchange = (e) =>
-      edit(() => editor.Engine.ApplyProperty("FontFamily", e.target.value));
-  if ($("font-size"))
-    $("font-size").onchange = (e) =>
-      edit(() =>
-        editor.Engine.ApplyProperty("FontSize", Number(e.target.value)),
-      );
-  if ($("text-color"))
-    $("text-color").oninput = (e) =>
-      edit(() => editor.Engine.ApplyProperty("Foreground", e.target.value));
-  if ($("highlight-color"))
-    $("highlight-color").oninput = (e) =>
-      edit(() => editor.Engine.ApplyProperty("Background", e.target.value));
-  update();
+  wordWorkspace?.Ribbon.selectTab(tab);
 }
 function showDialog(title, content, onSubmit) {
   $("dialog-title").textContent = title;
@@ -525,12 +356,13 @@ function setView(mode) {
     mode === "page" ? "▣ <span>Page</span>" : "☷ <span>Flow</span>";
 }
 function zoom(value) {
-  state.zoom = Math.max(50, Math.min(150, value));
+  state.zoom = Math.max(25, Math.min(150, value));
   editor.Zoom = state.zoom / 100;
   $("zoom").value = state.zoom;
   $("zoom-label").textContent = `${state.zoom}%`;
 }
 function openPanel(value) {
+  wordWorkspace?.ShowPane("properties");
   panel = value;
   document.body.classList.remove("hide-inspector");
   document
@@ -620,6 +452,7 @@ function attachReviewHandlers() {
     );
 }
 function run(command) {
+  if (wordWorkspace?.HandleCommand(command)) return;
   if (command === "collaboration-demo") return openCollaborationDemo(RT);
   safe(() => {
     const e = editor.Engine;
@@ -1160,6 +993,9 @@ function toggleTheme() {
     "richtextweb-theme",
     document.body.classList.contains("dark") ? "dark" : "light",
   );
+  wordWorkspace?.SetTheme(
+    document.body.classList.contains("dark") ? "dark" : "light",
+  );
 }
 function showCode(kind) {
   const codes = {
@@ -1212,8 +1048,7 @@ $("theme-toggle").onclick = toggleTheme;
 $("focus-mode").onclick = () => run("focus");
 $("toggle-navigation").onclick = () => run("navigation");
 $("show-navigation").onclick = () => run("navigation");
-$("toggle-inspector").onclick = () =>
-  document.body.classList.add("hide-inspector");
+$("toggle-inspector").onclick = () => wordWorkspace?.TogglePane("properties");
 $("export-primary").onclick = () => openPanel("export");
 $("zoom").oninput = (e) => zoom(+e.target.value);
 $("zoom-out").onclick = () => zoom(state.zoom - 10);
@@ -1320,12 +1155,35 @@ try {
 } catch {
   editor.Document = RT.fromHTML(templates.welcome.html);
 }
+wordWorkspace = createWordWorkspace({
+  editor,
+  RT,
+  run,
+  toast,
+  openPanel,
+  download,
+  persist,
+  openPagePreview,
+  setView,
+  zoom,
+});
 setView("page");
-zoom(100);
+zoom(
+  innerWidth < 900
+    ? Math.max(25, Math.floor(((innerWidth - 26) / 794) * 100))
+    : 100,
+);
 renderRibbon();
 renderPanel();
 update();
-window.richTextStudio = { editor, RT, loadTemplate, download, run };
+window.richTextStudio = {
+  editor,
+  RT,
+  loadTemplate,
+  download,
+  run,
+  workspace: wordWorkspace,
+};
 
 async function openPagePreview() {
   const dialog = document.createElement("dialog");

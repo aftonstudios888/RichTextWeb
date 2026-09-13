@@ -7,6 +7,9 @@ import { runReactBrowserChecks } from "../tests/react.browser.mjs";
 import { runReviewBrowserChecks } from "../tests/review.browser.mjs";
 import { runToolbarBrowserChecks } from "../tests/toolbar.browser.mjs";
 import { runPDFBrowserChecks } from "../tests/pdf.browser.mjs";
+import { runLayoutBrowserChecks } from "../tests/layout.browser.mjs";
+import { runWorkspaceBrowserChecks } from "../tests/workspace.browser.mjs";
+import { runRichCollaborationBrowserChecks } from "../tests/collaboration.browser.mjs";
 const port = process.env.PORT || "4190";
 const external = process.env.BROWSER_TEST_URL;
 const base = external || `http://127.0.0.1:${port}`;
@@ -68,6 +71,9 @@ try {
           (_, i) => `Control browser check ${i + 1}`,
         )),
   );
+  results.push(...(await runLayoutBrowserChecks(page)));
+  results.push(...(await runWorkspaceBrowserChecks(page)));
+  results.push(...(await runRichCollaborationBrowserChecks(page)));
   const reactResults = await runReactBrowserChecks(page);
   results.push(
     ...Array.from(
@@ -75,8 +81,13 @@ try {
       (_, i) => `React browser check ${i + 1}`,
     ),
   );
-  await page.getByRole("button", { name: "Developer", exact: true }).click();
-  await page.getByRole("button", { name: "Markdown", exact: true }).click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("tab", { name: "Developer", exact: true })
+    .click();
+  await page
+    .locator('#word-ribbon [data-control-id="source-markdown"]')
+    .click();
   await page
     .locator("#source-code")
     .fill("# Browser test\n\nHello **rich text** world.");
@@ -86,9 +97,12 @@ try {
     "Browser test\nHello rich text world.",
   );
   results.push("Markdown source editing updates model");
-  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("tab", { name: "Home", exact: true })
+    .click();
   await page.evaluate(() => richTextStudio.editor.Select(13, 18));
-  await page.locator('[data-command="ToggleBold"]').click();
+  await page.locator('#word-ribbon [data-control-id="ToggleBold"]').click();
   assert(
     await page.evaluate(() =>
       richTextStudio.RT.toHTML(richTextStudio.editor.Document).includes(
@@ -97,19 +111,32 @@ try {
     ),
   );
   results.push("Ribbon formatting retains document selection");
-  await page.getByRole("button", { name: "Insert", exact: true }).click();
-  await page.locator('[data-command="table"]').click();
-  await page.locator("#table-rows").fill("2");
-  await page.locator("#table-columns").fill("2");
-  await page.locator("#dialog-submit").click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("tab", { name: "Insert", exact: true })
+    .click();
+  await page.locator('#word-ribbon [data-control-id="Table"]').click();
+  await page.locator('#document-command-service input[name="rows"]').fill("2");
+  await page
+    .locator('#document-command-service input[name="columns"]')
+    .fill("2");
+  await page
+    .locator("#document-command-service")
+    .getByRole("button", { name: "Apply", exact: true })
+    .click();
   await page.waitForFunction(() =>
     richTextStudio.RT.toHTML(richTextStudio.editor.Document).includes("<table"),
   );
   results.push("Table insertion from dialog");
   results.push(...(await runReviewBrowserChecks(page)));
   results.push(...(await runToolbarBrowserChecks(page)));
-  await page.getByRole("button", { name: "Developer", exact: true }).click();
-  await page.locator('[data-command="collaboration-demo"]').click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("tab", { name: "Review", exact: true })
+    .click();
+  await page
+    .locator('#word-ribbon [data-control-id="collaboration-demo"]')
+    .click();
   await page.locator(".collaboration-dialog [data-network]").click();
   await page.evaluate(() => {
     const dialog = document.querySelector(".collaboration-dialog");
@@ -138,7 +165,10 @@ try {
   assert(dl.suggestedFilename().endsWith(".docx"));
   results.push("DOCX export download");
   await page.getByRole("button", { name: "File", exact: true }).click();
-  await page.locator('[data-command="pdf-tools"]').click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("button", { name: "Open PDF workspace", exact: true })
+    .click();
   await page.waitForFunction(
     () => document.querySelector("rich-pdf-editor")?.Engine?.PageCount > 0,
   );
@@ -153,7 +183,10 @@ try {
   results.push("PDF workspace conversion, overlay and download");
   results.push(...(await runPDFBrowserChecks(page)));
   await page.evaluate(() => richTextStudio.loadTemplate("welcome"));
-  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("tab", { name: "Home", exact: true })
+    .click();
   await page.waitForFunction(
     () => !document.getElementById("toast")?.classList.contains("visible"),
   );
@@ -176,7 +209,18 @@ try {
   );
   results.push("Mobile shell has no horizontal overflow");
   await page.setViewportSize({ width: 1512, height: 982 });
-  await page.locator('[data-panel="document"]').click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("tab", { name: "View", exact: true })
+    .click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("button", { name: "Properties", exact: true })
+    .click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("tab", { name: "Home", exact: true })
+    .click();
   await page.screenshot({
     path: "test-results/studio-desktop.png",
     fullPage: true,

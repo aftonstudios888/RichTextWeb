@@ -109,3 +109,9 @@ The retained set excludes macros, ActiveX, OLE, embedded executable/office attac
 ## Verification
 
 Tests cover exporter/importer round trips and independently constructed DOCX packages. They inspect actual ZIP parts, field instructions, note/story relationships, section boundaries, merged cells, comments/replies/resolution, tracked text and repeated opaque-chart round trips. Separate tests verify excluded active attachments, malicious HTML removal, Unicode and formatting resets. Representative baseline and advanced DOCX exports were independently loaded with python-docx, confirming headings, text, hyperlinks, vertical table merges, default/first-page headers and footer story references. PDF tests inspect independent PDF structures and graphics streams. These tests establish the documented capabilities, not exhaustive Word, WPF, PDF or RTF conformance.
+
+## Version 0.3 floating stories and revisions
+
+Figure/Floater child blocks round-trip through canonical JSON and inert XAML. HTML uses validated metadata and phrasing-safe spans, while importing the current visible story rather than a cached copy. Native DOCX writes DrawingML anchored text boxes. Markdown and RTF flatten these child stories. See [floating format details](FLOATING-FORMATS.md).
+
+DOCX maps supported run/paragraph formatting, text moves and row/cell revisions to native Open XML. RichTextWeb additionally saves a SHA-256-bound review extension for exact internal reversibility; import ignores it when the main document XML has changed externally. Generic structure and block moves do not imply complete Word revision interoperability. See [review and structure](REVIEW-AND-STRUCTURE.md).

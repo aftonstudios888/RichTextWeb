@@ -4,7 +4,13 @@ import {
   createField,
   type FieldType,
 } from "./document-features.js";
-import { FlowDocument, Paragraph, Run } from "./model.js";
+import {
+  FlowDocument,
+  Paragraph,
+  Run,
+  Figure,
+  type DocumentNode,
+} from "./model.js";
 
 const HTMLElementBase = (globalThis.HTMLElement ??
   class {}) as typeof HTMLElement;
@@ -15,6 +21,9 @@ interface Tool {
   title?: string;
 }
 const home: Tool[] = [
+  { label: "Paste", command: "Paste" },
+  { label: "Cut", command: "Cut" },
+  { label: "Copy", command: "Copy" },
   { label: "↶", command: "Undo", title: "Undo" },
   { label: "↷", command: "Redo", title: "Redo" },
   { label: "B", command: "ToggleBold", title: "Bold" },
@@ -36,18 +45,23 @@ const home: Tool[] = [
 const insert: Tool[] = [
   { label: "Table", command: "Table" },
   { label: "Image", command: "Image" },
+  { label: "Text box", command: "TextBox" },
+  { label: "Edit text box", command: "EditTextBox" },
   { label: "Link", command: "Link" },
   { label: "Unlink", command: "RemoveHyperlink" },
   { label: "Row +", command: "InsertTableRow" },
   { label: "Column +", command: "InsertTableColumn" },
   { label: "Row −", command: "DeleteTableRow" },
   { label: "Column −", command: "DeleteTableColumn" },
+  { label: "Merge cells", command: "MergeTableCells" },
+  { label: "Split cell", command: "SplitTableCell" },
   { label: "Field", command: "Field" },
   { label: "Contents", command: "TableOfContents" },
   { label: "Footnote", command: "Footnote" },
   { label: "Endnote", command: "Endnote" },
 ];
 const layout: Tool[] = [
+  { label: "Wrap / position", command: "FloatingLayout" },
   { label: "Page setup", command: "PageSetup" },
   { label: "Header", command: "Header" },
   { label: "Footer", command: "Footer" },
@@ -61,6 +75,7 @@ const layout: Tool[] = [
   { label: "Page preview", command: "PagePreview" },
 ];
 const review: Tool[] = [
+  { label: "Move selection", command: "MoveSelection" },
   { label: "Track changes", command: "TrackChanges" },
   { label: "Review changes", command: "ReviewChanges" },
   { label: "Accept all", command: "AcceptAllRevisions" },
@@ -120,6 +135,22 @@ export class RichTextToolbar extends HTMLElementBase {
           value.removeEventListener(event, handler),
         );
       }
+    if (value) {
+      const handler = (event: Event) => {
+        if (event.defaultPrevented) return;
+        event.preventDefault();
+        const object = value.GetSelectedObject();
+        this.executeSafe(
+          object?.type === "Figure" || object?.type === "Floater"
+            ? "EditTextBox"
+            : "FloatingLayout",
+        );
+      };
+      value.addEventListener("objecteditrequest", handler);
+      this.subscriptions.push(() =>
+        value.removeEventListener("objecteditrequest", handler),
+      );
+    }
     this.Refresh();
   }
   get Target() {
@@ -257,7 +288,7 @@ export class RichTextToolbar extends HTMLElementBase {
       .forEach((control) => {
         control.disabled =
           locked &&
-          !["PagePreview", "ReviewChanges"].includes(
+          !["PagePreview", "ReviewChanges", "Copy"].includes(
             control.dataset.command ?? "",
           );
         if (control.dataset.command === "Undo")
@@ -285,9 +316,7 @@ export class RichTextToolbar extends HTMLElementBase {
     if (status) status.textContent = this.status;
   }
   private executeSafe(command: string, parameter?: unknown) {
-    try {
-      this.Execute(command, parameter);
-    } catch (error) {
+    const report = (error: unknown) => {
       this.status = error instanceof Error ? error.message : String(error);
       this.Refresh();
       this.dispatchEvent(
@@ -297,6 +326,13 @@ export class RichTextToolbar extends HTMLElementBase {
           composed: true,
         }),
       );
+    };
+    try {
+      const result = this.Execute(command, parameter);
+      if (result && typeof (result as Promise<unknown>).then === "function")
+        void Promise.resolve(result).catch(report);
+    } catch (error) {
+      report(error);
     }
   }
   /** Commands can also be driven by framework bindings and application menus. */
@@ -305,7 +341,7 @@ export class RichTextToolbar extends HTMLElementBase {
     if (!editor) return false;
     if (
       editor.IsReadOnly &&
-      !["PagePreview", "ReviewChanges"].includes(command)
+      !["PagePreview", "ReviewChanges", "Copy"].includes(command)
     )
       return false;
     const engine = editor.Engine,
@@ -318,6 +354,176 @@ export class RichTextToolbar extends HTMLElementBase {
       return result;
     };
     switch (command) {
+      case "Copy":
+      case "Cut":
+      case "Paste":
+        return editor.Execute(command);
+      case "MoveSelection":
+        this.prompt(
+          "Move selected content",
+          [
+            {
+              name: "destination",
+              label: "Destination text offset (before the move)",
+              value: String(editor.Document.Text.length),
+              type: "number",
+            },
+          ],
+          (data) =>
+            mutate(() => engine.MoveSelection(Number(data.destination))),
+        );
+        break;
+      case "MergeTableCells":
+        this.prompt(
+          "Merge adjacent table cells",
+          [
+            {
+              name: "count",
+              label: "Number of cells",
+              value: "2",
+              type: "number",
+            },
+          ],
+          (data) => mutate(() => engine.MergeTableCells(Number(data.count))),
+        );
+        break;
+      case "TextBox":
+        this.prompt(
+          "Insert text box",
+          [
+            {
+              name: "text",
+              label: "Text",
+              value: "Text box",
+              type: "textarea",
+            },
+            {
+              name: "width",
+              label: "Width (px)",
+              value: "240",
+              type: "number",
+            },
+          ],
+          (data) =>
+            mutate(() => {
+              const width = Number(data.width);
+              if (!Number.isFinite(width) || width < 16 || width > 20000)
+                throw new RangeError(
+                  "Text box width must be between 16 and 20000 pixels.",
+                );
+              const figure = new Figure(new Paragraph(data.text));
+              figure.Width = width;
+              figure.SetValue("WrapStyle", "Square");
+              figure.SetValue("Padding", 12);
+              figure.SetValue("BorderBrush", "#8395ab");
+              figure.SetValue("BorderThickness", 1);
+              engine.InsertNode(figure.ToJSON());
+            }),
+        );
+        break;
+      case "EditTextBox": {
+        const object = editor.GetSelectedObject();
+        if (!object || !["Figure", "Floater"].includes(object.type))
+          throw new Error("Select or double-click a floating text box first.");
+        this.editFloatingStory(editor, object);
+        break;
+      }
+      case "FloatingLayout": {
+        const object = editor.GetSelectedObject();
+        if (!object) throw new Error("Select an image or text box first.");
+        const props = object.props;
+        const dimension = (value: unknown, fallback: number) =>
+          typeof value === "number"
+            ? value
+            : value && typeof value === "object" && "Value" in value
+              ? Number(value.Value) || fallback
+              : fallback;
+        this.prompt(
+          "Object wrapping and position",
+          [
+            {
+              name: "wrap",
+              label: "Text wrapping",
+              value:
+                props.WrapStyle ||
+                (object.type === "Figure" || object.type === "Floater"
+                  ? "Square"
+                  : "Inline"),
+              options: [
+                "Inline",
+                "Square",
+                "Tight",
+                "TopAndBottom",
+                "BehindText",
+                "InFrontOfText",
+              ],
+            },
+            {
+              name: "alignment",
+              label: "Horizontal alignment",
+              value: props.HorizontalAlignment || "Right",
+              options: ["Left", "Center", "Right"],
+            },
+            {
+              name: "width",
+              label: "Width (px)",
+              value: String(dimension(props.Width, 240)),
+              type: "number",
+            },
+            {
+              name: "height",
+              label: "Height (px, leave empty for automatic)",
+              value: props.Height ? String(dimension(props.Height, 120)) : "",
+              type: "number",
+            },
+            {
+              name: "x",
+              label: "Horizontal offset (px)",
+              value: String(props.HorizontalOffset || 0),
+              type: "number",
+            },
+            {
+              name: "y",
+              label: "Vertical offset (px)",
+              value: String(props.VerticalOffset || 0),
+              type: "number",
+            },
+            {
+              name: "distance",
+              label: "Distance from text (px)",
+              value: String(props.WrapDistance ?? 12),
+              type: "number",
+            },
+            {
+              name: "shape",
+              label: "Tight wrapping shape",
+              value: props.Shape || "Rectangle",
+              options: ["Rectangle", "Ellipse"],
+            },
+            {
+              name: "rotation",
+              label: "Rotation (degrees)",
+              value: String(props.Rotation || 0),
+              type: "number",
+            },
+          ],
+          (data) =>
+            mutate(() =>
+              editor.SetFloatingLayout(object.id, {
+                WrapStyle: data.wrap as any,
+                HorizontalAlignment: data.alignment as any,
+                Width: Number(data.width),
+                ...(data.height ? { Height: Number(data.height) } : {}),
+                HorizontalOffset: Number(data.x),
+                VerticalOffset: Number(data.y),
+                WrapDistance: Number(data.distance),
+                Shape: data.shape as any,
+                Rotation: Number(data.rotation),
+              }),
+            ),
+        );
+        break;
+      }
       case "Table":
         this.prompt(
           "Insert table",
@@ -681,6 +887,71 @@ export class RichTextToolbar extends HTMLElementBase {
     };
     dialog.showModal();
   }
+  private editFloatingStory(editor: RichTextBox, object: DocumentNode): void {
+    const dialog = this.shadowRoot!.querySelector("dialog")!;
+    dialog.replaceChildren();
+    dialog.style.width = "min(900px,95vw)";
+    const heading = this.ownerDocument.createElement("h2");
+    heading.textContent = "Edit floating text box";
+    const nested = this.ownerDocument.createElement("rich-text-box");
+    nested.ViewMode = "continuous";
+    nested.style.height = "320px";
+    nested.setAttribute("aria-label", "Text box content");
+    nested.Document = FlowDocument.FromJSON({
+      type: "FlowDocument",
+      id: `${object.id}-editing-story`,
+      props: { Annotations: object.props.StoryAnnotations || [] },
+      children: structuredClone(object.children || []),
+    });
+    const toolbar = this.ownerDocument.createElement("rich-text-toolbar");
+    toolbar.Mode = "home";
+    toolbar.Editor = nested;
+    const actions = this.ownerDocument.createElement("div");
+    actions.className = "actions";
+    const status = this.ownerDocument.createElement("p");
+    status.setAttribute("role", "status");
+    const cancel = this.ownerDocument.createElement("button");
+    cancel.textContent = "Cancel";
+    cancel.onclick = () => dialog.close();
+    const save = this.ownerDocument.createElement("button");
+    save.textContent = "Apply";
+    save.className = "primary";
+    const original = JSON.stringify(object.children || []);
+    save.onclick = () => {
+      try {
+        if (this.editor !== editor || editor.IsReadOnly)
+          throw new Error("The target editor changed or became read-only.");
+        const find = (node: DocumentNode): DocumentNode | undefined =>
+          node.id === object.id ? node : node.children?.map(find).find(Boolean);
+        const current = find(editor.Document.ToJSON());
+        if (!current || JSON.stringify(current.children || []) !== original)
+          throw new Error(
+            "Text box content changed while this dialog was open; close and reopen to edit the latest content.",
+          );
+        editor.Engine.EditFloatingContent(object.id, (story) =>
+          story.ReplaceDocument(nested.Document),
+        );
+        dialog.close();
+        editor.Focus();
+      } catch (error) {
+        status.textContent =
+          error instanceof Error ? error.message : String(error);
+      }
+    };
+    actions.append(cancel, save);
+    dialog.append(heading, toolbar, nested, status, actions);
+    dialog.addEventListener(
+      "close",
+      () => {
+        toolbar.Dispose();
+        nested.Dispose();
+        dialog.style.width = "";
+      },
+      { once: true },
+    );
+    dialog.showModal();
+    nested.Focus();
+  }
   private reviewChanges() {
     const dialog = this.shadowRoot!.querySelector("dialog")!;
     dialog.replaceChildren();
@@ -697,7 +968,7 @@ export class RichTextToolbar extends HTMLElementBase {
       const row = this.ownerDocument.createElement("div");
       row.className = "revision";
       const p = this.ownerDocument.createElement("p");
-      p.textContent = `${revision.Kind} · ${revision.Data.Author ?? "Author"}\n${revision.Data.Text ?? this.editor!.Document.Text.slice(revision.Start, revision.End)}`;
+      p.textContent = `${revision.Kind} · ${revision.Data.Author ?? "Author"}\n${revision.Data.Text ?? revision.Data.Operation ?? this.editor!.Document.Text.slice(revision.Start, revision.End)}`;
       row.append(p);
       for (const action of ["Accept", "Reject"]) {
         const b = this.ownerDocument.createElement("button");

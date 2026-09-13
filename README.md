@@ -9,7 +9,7 @@ A reusable rich text engine and flow document library for JavaScript, TypeScript
 
 **[Open Document Studio](https://wieslawsoltes.github.io/RichTextWeb/) · [Download releases](https://github.com/wieslawsoltes/RichTextWeb/releases) · [API and migration](docs/INTEGRATION.md) · [Compatibility](docs/COMPATIBILITY.md)**
 
-RichTextWeb 0.2 adds reversible patch history, live text positions, tracked-change review, collaborative text operations, measured page viewing, headers/footers, fields, notes, mail merge, PDF text reconstruction, and reusable editing tools. The public APIs follow familiar .NET patterns and work through web components, React and MVVM. Its desktop adapters host the same web engine. Complete Word/WPF API and rendering parity remains a larger compatibility target; the [compatibility matrix](docs/COMPATIBILITY.md) distinguishes implemented behavior from remaining boundaries.
+RichTextWeb 0.3 adds editable finite pages, floating rich text boxes and image handles, block virtualization, tracked formatting/moves/table revisions, structural coauthoring, original PDF text-operator editing and broader WPF-style property semantics. Document Studio combines a Word-style ribbon and dockable workspace with the same reusable editor controls used by applications. Complete Word/WPF API and rendering parity remains a compatibility target; the [compatibility matrix](docs/COMPATIBILITY.md) records the precise implemented behavior and remaining boundaries.
 
 ## Install
 
@@ -59,11 +59,11 @@ engine.Dispose();
 
 ```html
 <rich-text-toolbar for="editor" mode="all"></rich-text-toolbar>
-<rich-text-box
+<rich-text-page-editor
   id="editor"
   view-mode="page"
   aria-label="Article"
-></rich-text-box>
+></rich-text-page-editor>
 <script type="module">
   import { registerRichTextWeb } from "@wieslawsoltes/richtextweb/web";
   import { fromMarkdown } from "@wieslawsoltes/richtextweb/formats";
@@ -90,13 +90,13 @@ Bare module imports above are intended for bundlers or import maps. For a plain 
 </script>
 ```
 
-Registration is explicit and idempotent. `FlowDocumentReader`, `FlowDocumentScrollViewer`, and `FlowDocumentPageViewer` provide read-only controls. Style their exposed `editor` and `viewport` shadow parts or `--rt-*` CSS variables.
+Registration is explicit and idempotent. `RichTextPageEditor` supplies editable finite pages. For long continuous documents, set `RichTextBox.ViewMode = "continuous"` and `EnableVirtualization = true`; the control retains the visible top-level blocks and materializes selections as needed. `FlowDocumentReader`, `FlowDocumentScrollViewer`, and `FlowDocumentPageViewer` provide read-only controls. Style their exposed `editor` and `viewport` shadow parts or `--rt-*` CSS variables.
 
 ## React
 
 ```tsx
 import {
-  RichTextEditor,
+  RichTextPagedEditor,
   useFlowDocument,
 } from "@wieslawsoltes/richtextweb/react";
 import { fromMarkdown } from "@wieslawsoltes/richtextweb/formats";
@@ -104,7 +104,7 @@ import { fromMarkdown } from "@wieslawsoltes/richtextweb/formats";
 export function ArticleEditor() {
   const document = useFlowDocument(() => fromMarkdown("# Start writing"));
   return (
-    <RichTextEditor
+    <RichTextPagedEditor
       document={document}
       zoom={1}
       viewMode="page"
@@ -115,7 +115,7 @@ export function ArticleEditor() {
 }
 ```
 
-React 18/19 compatibility, ref access, revision hooks, read-only state and selection callbacks are provided. The model is mutable; use `useDocumentRevision` or `useFlowDocument` to subscribe to mutations rather than relying on changed object identity.
+Both `RichTextEditor` (continuous or growing page surface) and `RichTextPagedEditor` (finite editable pages) support React 18/19, ref access, revision hooks, readonly state and selection callbacks. Virtualization props configure the shared continuous-view block window. The model is mutable; use `useDocumentRevision` or `useFlowDocument` to subscribe to mutations rather than relying on changed object identity.
 
 ## MVVM and desktop migration
 
@@ -161,7 +161,7 @@ The JSON message bridge exposes document loading, editing, selection, formatting
 | WinUI 3  | `WinUiRichTextHost.ConnectAsync`, WebView2 transport    | Windows App SDK and WebView2 runtime                  |
 | Avalonia | `AvaloniaRichTextHost.Connect`, NativeWebView transport | A compatible Avalonia NativeWebView component/runtime |
 
-`RichTextDocumentClient` provides asynchronous editing commands, request correlation, timeouts, cancellation and `INotifyPropertyChanged` notifications for revision, undo/redo state and optional document snapshots. All hosts execute the JavaScript engine inside their WebView. Version 0.2 provides compiled shared/WPF/Avalonia projects, executable C# protocol checks against the real Node engine, and a Windows WPF/WebView2 smoke workflow. Native runtime results and artifacts are reported by CI; WinUI/Avalonia UI, physical input and assistive technology need target-specific qualification.
+`RichTextDocumentClient` provides asynchronous editing commands, request correlation, timeouts, cancellation and `INotifyPropertyChanged` notifications for revision, undo/redo state and optional document snapshots. All hosts execute the JavaScript engine inside their WebView. Version 0.3 includes executable WPF, WinUI and Avalonia sample applications, shared C# protocol checks against the real Node engine, and Windows runtime smoke gates with rendered evidence. CI records results for the checked commit; other operating systems, physical input and assistive technology require target-specific qualification.
 
 See [complete integration examples](docs/INTEGRATION.md) for React refs/hooks, bridge setup, transport ownership, threading and lifecycle cleanup. The [native host guide](adapters/dotnet/README.md) explains asset packaging, UI-thread requirements and trusted-document navigation.
 
@@ -196,7 +196,7 @@ const editedPdf = await pdf.Save();
 
 HTML uses an inert parser and an allowlist for content, styles, and URLs. XAML supports the implemented flow-document data schema without executing markup extensions or object constructors. DOCX produces and reads real Open XML ZIP packages. Markdown uses GFM parsing. JSON preserves the full engine model; other serializers preserve their documented subsets.
 
-PDF output contains selectable text and supports pagination, tables, images, and supplied fonts. The PDF editor adds text/images/highlights and reorganizes pages. **Visual covers are not secure redaction** and do not remove underlying text. It does not reconstruct arbitrary existing PDF text into editable flow paragraphs. See [format support](docs/FORMATS.md) for layout and conversion boundaries.
+PDF output contains selectable text and supports pagination, tables, images, and supplied fonts. The PDF editor adds text/images/highlights and reorganizes pages. **Visual covers are not secure redaction** and do not remove underlying text. The optional `/pdf` module can reconstruct extracted text as an editable flow document and can also inspect and modify supported original PDF text-showing operators. Original-source editing preserves surrounding page content; reconstruction creates a new document with its own layout. See [format support](docs/FORMATS.md) for layout and conversion boundaries.
 
 ## Package entry points
 
@@ -233,11 +233,20 @@ The npm workflow downloads the immutable GitHub release tarball, verifies its ch
 
 See [release verification and registry recovery](docs/RELEASING.md) for bounded publication retries and how to distinguish registry delays from staged packages awaiting approval.
 
+## Document Studio integrations
+
+The sample uses the published RibbonWeb, Dockyard, TreeDataGridWeb, DynamicDataWeb, ReactiveWeb, RBushWeb and QuikGraphWeb libraries for its ribbon, dockable tools, document explorer, reactive filtering/view model, spatial hit testing and reference graph. These are development dependencies of the sample; applications can use the rich controls independently. The sample build includes third-party license notices, including QuikGraphWeb's MS-PL terms.
+
 ## Documentation
 
 - [Document model and positions](docs/MODEL.md)
 - [Editing commands, history, annotations](docs/ENGINE.md)
+- [Formatting/move/table review and DOCX semantics](docs/REVIEW-AND-STRUCTURE.md)
 - [Browser controls and rendering](docs/CONTROL.md)
+- [WPF-style dependency property semantics](docs/WPF-PROPERTY-SYSTEM.md)
+- [Rich coauthoring protocol](docs/COLLABORATION.md)
+- [Floating story interchange](docs/FLOATING-FORMATS.md)
+- [Original PDF editing](docs/PDF.md)
 - [Format support and fidelity](docs/FORMATS.md)
 - [React, MVVM, desktop bridge](docs/INTEGRATION.md)
 - [Compatibility matrix](docs/COMPATIBILITY.md)
@@ -247,7 +256,7 @@ MIT licensed. This is an independent implementation; it does not contain the pro
 
 ## Advanced editing and document generation
 
-The standalone `RichTextToolbar` provides formatting, table and image tools, fields, notes, headers/footers, comments and tracked-change review. It binds to an existing `RichTextBox` and uses that control's engine, selection, history and read-only state. The sample's Home and Advanced tools tabs use this component.
+The standalone `RichTextToolbar` provides formatting, table and image tools, fields, notes, headers/footers, comments and tracked-change review. It binds to an existing `RichTextBox` and uses that control's engine, selection, history and read-only state. The sample routes RibbonWeb commands through this component and exposes its full UI in a Dockyard pane.
 
 ```ts
 import { DocumentFeatures } from "@wieslawsoltes/richtextweb";

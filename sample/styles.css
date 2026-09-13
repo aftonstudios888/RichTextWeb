@@ -150,7 +150,7 @@ button.primary:hover {
   font-size: 22px;
 }
 .share-button {
-  background: var(--accent) !important;
+  background: var(--accent);
   color: white;
   padding: 8px 14px;
   font-weight: 500;

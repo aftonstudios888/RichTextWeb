@@ -147,23 +147,24 @@ export async function runReviewBrowserChecks(page) {
         richTextStudio.run(command);
       richTextStudio.loadTemplate("blank");
     });
-    await page.getByRole("button", { name: "Home", exact: true }).click();
-    assert.equal(await page.locator("#font-size").isDisabled(), true);
+    await page
+      .locator("#word-ribbon")
+      .getByRole("tab", { name: "Home", exact: true })
+      .click();
+    assert.equal(
+      await page
+        .locator("#word-ribbon")
+        .getByRole("combobox", { name: "Size", exact: true })
+        .isDisabled(),
+      true,
+    );
     await page.evaluate(() => {
-      for (const [id, value, event] of [
-        ["font-size", "42", "change"],
-        ["font-family", "Georgia", "change"],
-        ["text-color", "#ff0000", "input"],
-        ["highlight-color", "#00ff00", "input"],
-      ]) {
-        const input =
-          document.getElementById(id) ??
-          document
-            .querySelector("rich-text-toolbar")
-            .shadowRoot.getElementById(id);
-        input.value = value;
-        input.dispatchEvent(new Event(event, { bubbles: true }));
-      }
+      // Exercise programmatic command dispatch as well as the disabled visual controls.
+      const toolbar = richTextStudio.workspace.Toolbar;
+      toolbar.Execute("FontSize", 42);
+      toolbar.Execute("FontFamily", "Georgia");
+      toolbar.Execute("Foreground", "#ff0000");
+      toolbar.Execute("Background", "#00ff00");
     });
     await page.evaluate(() => richTextStudio.run("source-json"));
     assert.equal(await page.locator("#apply-source").isDisabled(), true);
@@ -248,7 +249,10 @@ export async function runReviewBrowserChecks(page) {
       ),
     );
     await page.evaluate(() => richTextStudio.editor.Engine.Select(0));
-    await page.getByRole("button", { name: "Insert", exact: true }).click();
+    await page
+      .locator("#word-ribbon")
+      .getByRole("tab", { name: "Table layout", exact: true })
+      .click();
     const geometry = () =>
       page.evaluate(() => {
         const counts = { rows: 0, cells: 0 };
@@ -260,13 +264,21 @@ export async function runReviewBrowserChecks(page) {
         visit(richTextStudio.editor.Document.ToJSON());
         return counts;
       });
-    await page.locator('[data-command="table-row-before"]').click();
+    await page
+      .locator('#word-ribbon [data-control-id="table-row-before"]')
+      .click();
     assert.deepEqual(await geometry(), { rows: 3, cells: 6 });
-    await page.locator('[data-command="table-column-before"]').click();
+    await page
+      .locator('#word-ribbon [data-control-id="table-column-before"]')
+      .click();
     assert.deepEqual(await geometry(), { rows: 3, cells: 9 });
-    await page.locator('[data-command="table-row-delete"]').click();
+    await page
+      .locator('#word-ribbon [data-control-id="DeleteTableRow"]')
+      .click();
     assert.deepEqual(await geometry(), { rows: 2, cells: 6 });
-    await page.locator('[data-command="table-column-delete"]').click();
+    await page
+      .locator('#word-ribbon [data-control-id="DeleteTableColumn"]')
+      .click();
     assert.deepEqual(await geometry(), { rows: 2, cells: 4 });
     results.push(
       "Table toolbar inserts and deletes actual model rows and columns",
