@@ -163,6 +163,11 @@ assert.equal(root.DocumentSerializer, formats.DocumentSerializer, 'root/formats 
 assert.equal(root.ObservableObject, mvvm.ObservableObject, 'root/mvvm must share observable constructors');
 assert.equal(root.RichTextWebBridge, bridge.RichTextWebBridge, 'root/bridge must share bridge constructors');
 assert.ok(react.RichTextEditor, 'optional React component must import');
+assert.equal(root.DocumentFeatures, features.DocumentFeatures);
+assert.equal(root.CollaborativeTextSession, collaboration.CollaborativeTextSession);
+assert.equal(root.RichTextToolbar, web.RichTextToolbar);
+assert.equal(typeof pdf.fromPDF, 'function');
+assert.equal(typeof pdf.PDFEditorControl, 'function');
 const document = new core.FlowDocument(new core.Paragraph('published package'));
 const engine = new root.RichTextEngine(document);
 engine.Select(0, 9); engine.InsertText('installed');
@@ -190,6 +195,9 @@ transport.Dispose(); engine.Dispose(); model.Dispose();
     ["mvvm", "/mvvm"],
     ["bridge", "/bridge"],
     ["react", "/react"],
+    ["features", "/document"],
+    ["collaboration", "/collaboration"],
+    ["pdf", "/pdf"],
   ];
   const esm = `import assert from 'node:assert/strict';\n${entries.map(([name, suffix]) => `import * as ${name} from '${manifest.name}${suffix}';`).join("\n")}\n${assertions}\nconsole.log('Installed ESM consumer passed.');\n`;
   const cjs = `const assert = require('node:assert/strict');\n${entries.map(([name, suffix]) => `const ${name} = require('${manifest.name}${suffix}');`).join("\n")}\n${assertions}\nconsole.log('Installed CommonJS consumer passed.');\n`;
@@ -206,6 +214,9 @@ import { ObservableObject, RelayCommand, Binding, BindingMode } from '${manifest
 import { RichTextEditor, type RichTextEditorProps } from '${manifest.name}/react';
 import { RichTextWebBridge, type BridgeOutgoingMessage } from '${manifest.name}/bridge';
 import { createElement } from 'react';
+import { DocumentFeatures } from '${manifest.name}/document';
+import { CollaborativeTextSession } from '${manifest.name}/collaboration';
+import { fromPDF, PDFEditorControl } from '${manifest.name}/pdf';
 const document = new FlowDocument(new Paragraph(new Run('typed consumer')));
 const engine = new RichTextEngine(document);
 engine.ApplyProperty(TextElement.FontWeightProperty.Name, 'Bold');

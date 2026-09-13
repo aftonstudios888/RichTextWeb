@@ -11,7 +11,9 @@ These source adapters embed the **same JavaScript RichTextWeb engine** in WPF, W
 | `Avalonia` | NativeWebView transport and attachment helper                                     | Avalonia NativeWebView component |
 | `web`      | `editor.html` with JS bridge initialization                                       | Built RichTextWeb `dist/` assets |
 
-The shared project can be referenced with `ProjectReference` or its source included directly. Compile the transport and appropriate framework helper source in the host application, which owns the framework dependency versions. The TypeScript bridge is tested in Node; native C# compilation, WebView runtime packaging, native accessibility integration and physical platform testing were **not performed** in the build workspace. The framework helpers are source integrations, not published or qualified native NuGet controls.
+Version 0.2 adds real projects with pinned dependencies in `Directory.Build.props`, an executable C# protocol suite, native package creation, a runnable WPF sample and Windows WebView2 smoke qualification. Reference the appropriate project directly or use the NuGet artifacts produced by the Desktop qualification workflow. Public nuget.org publication requires a separate publishing configuration and is not performed by this workflow.
+
+The local .NET 8 SDK compiled the shared client, WPF host, WPF smoke application and Avalonia host. Seven C# protocol checks passed, including a live C# process exchanging requests and events with the actual JavaScript engine in Node. Windows UI execution is handled by the Windows workflow; the Linux workspace cannot execute the WPF application. A passing Windows job records the WebView2 version, assertions and a rendered screenshot. WinUI/Avalonia UI runtime, physical keyboard/IME, screen readers and physical GPU qualification remain separate application-level checks.
 
 ## Prepare the assets
 
@@ -20,16 +22,14 @@ From the repository root:
 ```sh
 npm ci
 npm run build
-mkdir -p native-assets
-cp adapters/dotnet/web/editor.html native-assets/editor.html
-cp -R dist native-assets/dist
+node adapters/dotnet/scripts/prepare-assets.mjs native-assets
 ```
 
-For WPF/WinUI, include `native-assets` with the application and point `ConnectAsync` at its absolute path. The helper maps this directory to `https://richtextweb.local`, allowing local ESM imports without a network service. For Avalonia, serve the directory from a local HTTP server owned by the application, or use a trusted HTTPS deployment whose source and lifecycle you control.
+For WPF/WinUI, include `native-assets` with the application and point `ConnectAsync` at its absolute path. The helper maps this directory to `https://richtextweb.local`, loading the standalone browser bundle without a network service or unresolved npm imports. For Avalonia, serve the directory from a local HTTP server owned by the application, or use a trusted HTTPS deployment whose source and lifecycle you control.
 
 ## WPF
 
-Add a WPF WebView2 control to a loaded window. Reference `Shared/RichTextWeb.Bridge.csproj`, and include `WebView2/CoreWebView2Transport.cs` and `Wpf/WpfRichTextHost.cs` in that application.
+Add a WPF WebView2 control to a loaded window and reference `Wpf/RichTextWeb.Wpf.csproj`. It references the shared bridge project and includes the common WebView2 transport. The sample in `Samples/WpfSmoke` is both a runnable editor host and a self-checking CI executable.
 
 ```csharp
 // Keep the client as a field and dispose it when the window closes.
@@ -46,7 +46,7 @@ The WebView2 helper is based on the documented [`EnsureCoreWebView2Async`, virtu
 
 ## WinUI
 
-Include the shared project, `WebView2/CoreWebView2Transport.cs` and `WinUI/WinUiRichTextHost.cs`. After the `Microsoft.UI.Xaml.Controls.WebView2` control is loaded:
+Reference `WinUI/RichTextWeb.WinUI.csproj`. After the `Microsoft.UI.Xaml.Controls.WebView2` control is loaded:
 
 ```csharp
 _client = await WinUiRichTextHost.ConnectAsync(EditorWebView, assetsDirectory);
@@ -58,7 +58,7 @@ The Windows App SDK provides the WebView2 control; see the [official WinUI WebVi
 
 ## Avalonia
 
-Include the shared project and `Avalonia/AvaloniaRichTextHost.cs`. Use the `Avalonia.Controls.NativeWebView` component supported by the application's Avalonia version and native platform. Attach before navigating:
+Reference `Avalonia/RichTextWeb.Avalonia.csproj`. Its pinned official `Avalonia.Controls.WebView` package requires an Avalonia Accelerate license to run; this repository does not provide or bypass that license. Attach before navigating:
 
 ```csharp
 _client = AvaloniaRichTextHost.Connect(EditorWebView,
@@ -68,6 +68,60 @@ await _client.InsertTextAsync("Hello from Avalonia");
 ```
 
 The host uses `NativeWebView.InvokeScript` for requests and `WebMessageReceived` / `invokeCSharpAction` for replies. The corresponding [official NativeWebView API](https://docs.avaloniaui.net/controls/web/nativewebview) describes the platform-specific runtime prerequisites. Linux/macOS/Windows support and component availability depend on the installed Avalonia WebView distribution. This repository does not supply those native runtimes or commercial component licenses.
+
+## Build, test and package
+
+From the repository root, with .NET 8 and Node.js installed:
+
+```sh
+npm ci
+npm run build
+dotnet run --project adapters/dotnet/Tests/RichTextWeb.Bridge.Tests.csproj -c Release
+dotnet build adapters/dotnet/Wpf/RichTextWeb.Wpf.csproj -c Release
+dotnet build adapters/dotnet/Avalonia/RichTextWeb.Avalonia.csproj -c Release
+dotnet pack adapters/dotnet/Shared/RichTextWeb.Bridge.csproj -c Release -o artifacts/desktop/packages
+```
+
+The C# tests exercise out-of-order response correlation, remote errors, malformed responses, timeout/cancellation, disposal, MVVM events, hostile envelopes and real Node engine editing/undo/redo/formatting/revision conflict handling. They run without external test-framework packages.
+
+On Windows, use the Visual Studio Developer Shell to build WinUI with `msbuild adapters/dotnet/WinUI/RichTextWeb.WinUI.csproj /restore /t:Build /p:Configuration=Release /p:Platform=x64`. Windows App SDK packaging tasks require the Visual Studio Windows application build tools; the Linux SDK can compile the facade but cannot complete those packaging tasks. This facade contains no XAML or PRI resources; the consuming application generates its own resources. The project uses Windows App SDK types directly.
+
+To run the native WPF editor or its automatic checks:
+
+```sh
+node adapters/dotnet/scripts/prepare-assets.mjs artifacts/desktop/web
+dotnet run --project adapters/dotnet/Samples/WpfSmoke/RichTextWeb.WpfSmoke.csproj -c Release -- --assets artifacts/desktop/web
+# Windows CI smoke: adds command assertions, captures PNG/JSON, then exits.
+dotnet run --project adapters/dotnet/Samples/WpfSmoke/RichTextWeb.WpfSmoke.csproj -c Release -- --smoke --assets artifacts/desktop/web --report artifacts/desktop/smoke
+```
+
+The [Desktop qualification workflow](../../.github/workflows/desktop.yml) is reusable from the main release pipeline and can also be dispatched manually. Its Linux job runs the actual C# test program and builds/packages Avalonia. Its Windows job builds WPF and WinUI, installs WebView2 when necessary, runs the real WPF host and packages the runnable sample. Missing WebView2 or failed smoke assertions fail the job; they do not count as skipped passes. Artifacts contain `.nupkg`/`.snupkg` files, the sample, standalone web assets, the smoke JSON and the screenshot. The Windows smoke covers programmatic native messages and browser rendering, not physical input devices or a complete desktop accessibility audit.
+
+Pinned dependency versions are WebView2 1.0.3537.50, Windows App SDK 1.7.260224002, Avalonia 11.3.9 and Avalonia.Controls.WebView 11.3.16. Updating them should rerun desktop qualification.
+
+## Fields, stories, notes, review and mail merge
+
+`DocumentFeatureAsync` exposes the shared document feature layer through validated JSON, without injecting scripts:
+
+```csharp
+await _client.DocumentFeatureAsync("InsertField", new { type = "MERGEFIELD", argument = "Name" });
+await _client.DocumentFeatureAsync("UpdateFields", new {
+    context = new { Data = new { Name = "Ada" }, PageNumber = 1, PageCount = 3,
+        Now = "2026-09-13T12:00:00Z" }
+});
+var documents = await _client.DocumentFeatureAsync("MailMerge", new {
+    records = new[] { new { Name = "Ada" }, new { Name = "Lin" } }
+});
+var note = await _client.DocumentFeatureAsync("InsertNote", new { kind = "Footnote", content = "Review note" });
+await _client.DocumentFeatureAsync("UpdateNote", new {
+    kind = "Footnote", id = note.GetProperty("id").GetString(), content = "Updated note"
+});
+await _client.ExecuteAsync("CurrentAuthor", "Document reviewer");
+await _client.ExecuteAsync("TrackChanges", true);
+var review = await _client.GetReviewStateAsync();
+```
+
+Other supported feature operations are `SetStory`, `InsertTableOfContents` and `UpdateTableOfContents`; their argument names are listed in the [protocol reference](../../docs/INTEGRATION.md). Supply `expectedRevision` to the C# wrapper when a command depends on a previously read version. Mutations obey the host's read-only policy. Mail merge creates independent JSON documents and permits read-only template export; it is bounded to 1,000 records and the bridge's output budget. `PageMap` provides page numbers by node ID and `Now` carries an ISO date/time string; native callers never pass executable JavaScript resolvers.
 
 ## Documents, threading and lifecycle
 

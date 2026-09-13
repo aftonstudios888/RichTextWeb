@@ -1,6 +1,14 @@
 import { FlowDocument } from "./model.js";
 import type { DocumentNode } from "./model.js";
 import type { RichTextEngine } from "./engine.js";
+import { DocumentFeatures } from "./document-features.js";
+import type {
+  FieldContext,
+  FieldType,
+  StoryKind,
+  NoteKind,
+  TableOfContentsOptions,
+} from "./document-features.js";
 import { ObservableEvent, Subscription } from "./mvvm.js";
 import type { IDisposable } from "./mvvm.js";
 
@@ -230,6 +238,136 @@ function validateDocument(
   return value as DocumentNode;
 }
 
+const fieldTypes = new Set([
+  "PAGE",
+  "NUMPAGES",
+  "DATE",
+  "TIME",
+  "REF",
+  "PAGEREF",
+  "MERGEFIELD",
+  "SEQ",
+  "TITLE",
+  "AUTHOR",
+  "FILENAME",
+]);
+const storyKinds = new Set([
+  "Headers",
+  "Footers",
+  "FirstPageHeader",
+  "FirstPageFooter",
+  "EvenPageHeader",
+  "EvenPageFooter",
+]);
+const noteKinds = new Set(["Footnote", "Endnote"]);
+function optionalString(
+  params: Record<string, unknown>,
+  name: string,
+): string | undefined {
+  return params[name] === undefined ? undefined : stringParam(params, name);
+}
+function enumParam<T extends string>(
+  params: Record<string, unknown>,
+  name: string,
+  allowed: Set<string>,
+): T {
+  const value = stringParam(params, name);
+  if (!allowed.has(value))
+    throw new ProtocolError("invalid_params", `Unsupported ${name}: ${value}`);
+  return value as T;
+}
+/** Native callers supply date strings and page maps, never executable resolver callbacks. */
+function fieldContext(value: unknown): FieldContext {
+  if (value === undefined) return {};
+  if (!record(value))
+    throw new ProtocolError("invalid_params", "context must be an object");
+  const context: FieldContext = {};
+  const allowed = new Set([
+    "PageNumber",
+    "PageCount",
+    "Now",
+    "Locale",
+    "Data",
+    "FileName",
+    "PageMap",
+  ]);
+  for (const key of Object.keys(value))
+    if (!allowed.has(key))
+      throw new ProtocolError(
+        "invalid_params",
+        `Unsupported field context member: ${key}`,
+      );
+  for (const key of ["PageNumber", "PageCount"] as const) {
+    if (value[key] !== undefined) {
+      const number = integerParam(value, key);
+      if (number < 1)
+        throw new ProtocolError("invalid_params", `${key} must be positive`);
+      context[key] = number;
+    }
+  }
+  if (value.Now !== undefined) {
+    const date = stringParam(value, "Now");
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(date) || !Number.isFinite(Date.parse(date)))
+      throw new ProtocolError(
+        "invalid_params",
+        "Now must be an ISO date/time string",
+      );
+    context.Now = new Date(date);
+  }
+  if (value.Locale !== undefined) context.Locale = stringParam(value, "Locale");
+  if (value.FileName !== undefined)
+    context.FileName = stringParam(value, "FileName");
+  if (value.Data !== undefined) {
+    if (!record(value.Data))
+      throw new ProtocolError("invalid_params", "Data must be an object");
+    context.Data = value.Data;
+  }
+  if (value.PageMap !== undefined) {
+    if (!record(value.PageMap))
+      throw new ProtocolError(
+        "invalid_params",
+        "PageMap must map node IDs to positive page numbers",
+      );
+    const pages = value.PageMap;
+    for (const [id, page] of Object.entries(pages))
+      if (!id || !Number.isSafeInteger(page) || Number(page) < 1)
+        throw new ProtocolError(
+          "invalid_params",
+          "PageMap values must be positive integers",
+        );
+    context.PageOfNode = (id) => pages[id] as number | undefined;
+  }
+  return context;
+}
+function tocOptions(value: unknown): TableOfContentsOptions {
+  if (value === undefined) return {};
+  if (!record(value))
+    throw new ProtocolError("invalid_params", "options must be an object");
+  const options: TableOfContentsOptions = {};
+  for (const name of Object.keys(value))
+    if (!["MaxLevel", "Title", "IncludePageNumbers"].includes(name))
+      throw new ProtocolError(
+        "invalid_params",
+        `Unsupported TOC option: ${name}`,
+      );
+  if (value.MaxLevel !== undefined) {
+    const level = integerParam(value, "MaxLevel");
+    if (level < 1 || level > 9)
+      throw new ProtocolError("invalid_params", "MaxLevel must be 1–9");
+    options.MaxLevel = level;
+  }
+  if (value.Title !== undefined) options.Title = stringParam(value, "Title");
+  if (value.IncludePageNumbers !== undefined) {
+    if (typeof value.IncludePageNumbers !== "boolean")
+      throw new ProtocolError(
+        "invalid_params",
+        "IncludePageNumbers must be a boolean",
+      );
+    options.IncludePageNumbers = value.IncludePageNumbers;
+  }
+  return options;
+}
+
 /** Owns only its subscriptions, never the supplied engine. No eval or arbitrary member access. */
 export class RichTextWebBridge implements IDisposable {
   readonly TransportError = new ObservableEvent<unknown>();
@@ -323,6 +461,13 @@ export class RichTextWebBridge implements IDisposable {
         "undo",
         "redo",
         "execute",
+        "insertField",
+        "updateFields",
+        "setStory",
+        "insertNote",
+        "updateNote",
+        "insertTableOfContents",
+        "updateTableOfContents",
       ]);
       if (mutating.has(request.method)) {
         if (this.options.isReadOnly?.())
@@ -340,6 +485,19 @@ export class RichTextWebBridge implements IDisposable {
             "The document has changed since the expected revision",
           );
       }
+      const features = new DocumentFeatures(this.Engine);
+      const blocks = (value: unknown): DocumentNode[] => {
+        if (!Array.isArray(value))
+          throw new ProtocolError(
+            "invalid_params",
+            "blocks must be a document node array",
+          );
+        const root = new FlowDocument().ToJSON();
+        root.children = value;
+        return (
+          validateDocument(root, this.maxNodes, this.maxDepth).children ?? []
+        );
+      };
       let result: unknown;
       switch (request.method) {
         case "getDocument":
@@ -351,6 +509,104 @@ export class RichTextWebBridge implements IDisposable {
         case "getState":
           result = this.GetState();
           break;
+        case "getReviewState":
+          result = {
+            trackChanges: this.Engine.TrackChanges,
+            currentAuthor: this.Engine.CurrentAuthor,
+            revisions: this.Engine.Revisions,
+          };
+          break;
+        case "insertField":
+          features.InsertField(
+            enumParam<FieldType>(params, "type", fieldTypes),
+            optionalString(params, "argument") ?? "",
+            optionalString(params, "format"),
+          );
+          result = this.GetState();
+          break;
+        case "updateFields":
+          result = features.UpdateFields(fieldContext(params.context));
+          break;
+        case "setStory":
+          features.SetStory(
+            enumParam<StoryKind>(params, "kind", storyKinds),
+            blocks(params.blocks),
+            optionalString(params, "sectionId"),
+          );
+          result = this.GetState();
+          break;
+        case "insertNote":
+          result = {
+            id: features.InsertNote(
+              enumParam<NoteKind>(params, "kind", noteKinds),
+              typeof params.content === "string"
+                ? params.content
+                : blocks(params.content),
+            ),
+          };
+          break;
+        case "updateNote":
+          features.UpdateNote(
+            enumParam<NoteKind>(params, "kind", noteKinds),
+            stringParam(params, "id"),
+            stringParam(params, "content"),
+          );
+          result = this.GetState();
+          break;
+        case "insertTableOfContents":
+          features.InsertTableOfContents(
+            tocOptions(params.options),
+            fieldContext(params.context),
+          );
+          result = this.GetState();
+          break;
+        case "updateTableOfContents":
+          result = {
+            updated: features.UpdateTableOfContents(
+              fieldContext(params.context),
+            ),
+          };
+          break;
+        case "mailMerge": {
+          if (
+            params.expectedRevision !== undefined &&
+            integerParam(params, "expectedRevision") !==
+              this.Engine.Document.Revision
+          )
+            throw new ProtocolError(
+              "revision_conflict",
+              "The merge template has changed since the expected revision",
+            );
+          if (
+            !Array.isArray(params.records) ||
+            params.records.length > 1000 ||
+            !params.records.every(record)
+          )
+            throw new ProtocolError(
+              "invalid_params",
+              "records must be an array of at most 1000 JSON objects",
+            );
+          const context = fieldContext(params.context);
+          if (context.Data !== undefined)
+            throw new ProtocolError(
+              "invalid_params",
+              "Mail merge data must be supplied in records",
+            );
+          const documents: DocumentNode[] = [];
+          let outputSize = 2;
+          for (const data of params.records) {
+            const merged = features.MailMerge([data], context)[0]!.ToJSON();
+            outputSize += JSON.stringify(merged).length + 1;
+            if (outputSize > this.maxMessageLength)
+              throw new ProtocolError(
+                "message_too_large",
+                "Merged documents exceed the bridge output budget; use smaller batches",
+              );
+            documents.push(merged);
+          }
+          result = documents;
+          break;
+        }
         case "setDocument":
           this.Engine.SetDocument(
             FlowDocument.FromJSON(

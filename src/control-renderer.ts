@@ -11,6 +11,108 @@ export interface RenderResult {
   leaves: Array<{ node: Node; start: number; end: number; atomic?: boolean }>;
   paragraphs: Array<{ node: HTMLElement; start: number; end: number }>;
   length: number;
+  statistics?: RenderStatistics;
+  /** @internal Reusable detached templates; never the live editing DOM. */
+  templates?: Map<string, HTMLElement>;
+}
+export interface RenderStatistics {
+  Created: number;
+  Reused: number;
+  Updated: number;
+  Removed: number;
+}
+
+/** Commit a detached render by stable document IDs, retaining live DOM identity. */
+export function reconcileDocumentDOM(
+  surface: HTMLElement,
+  next: RenderResult,
+): RenderResult {
+  const existing = new Map<string, Element>();
+  surface
+    .querySelectorAll("[data-rt-id]")
+    .forEach((element) =>
+      existing.set((element as HTMLElement).dataset.rtId!, element),
+    );
+  const remap = new Map<Node, Node>();
+  const stats: RenderStatistics = {
+    Created: 0,
+    Reused: 0,
+    Updated: 0,
+    Removed: 0,
+  };
+  const committedPositions = new WeakMap<Node, DOMPosition>();
+  function reconcile(parent: Node, desired: Node[]): void {
+    const retained: Node[] = [];
+    for (let index = 0; index < desired.length; index++) {
+      const source = desired[index];
+      const id =
+        source.nodeType === 1
+          ? (source as HTMLElement).dataset.rtId
+          : undefined;
+      let live: Node | undefined = id
+        ? existing.get(id)
+        : parent.childNodes[index];
+      if (
+        !live ||
+        live.nodeType !== source.nodeType ||
+        live.nodeName !== source.nodeName ||
+        (!id && live.nodeType === 1 && (live as HTMLElement).dataset.rtId)
+      )
+        live = undefined;
+      if (live) {
+        stats.Reused++;
+        if (source.nodeType === 3) {
+          if (live.nodeValue !== source.nodeValue) {
+            live.nodeValue = source.nodeValue;
+            stats.Updated++;
+          }
+        } else if (source.nodeType === 1) {
+          const target = live as Element,
+            template = source as Element;
+          let updated = false;
+          for (const attribute of Array.from(target.attributes))
+            if (!template.hasAttribute(attribute.name)) {
+              target.removeAttribute(attribute.name);
+              updated = true;
+            }
+          for (const attribute of Array.from(template.attributes))
+            if (target.getAttribute(attribute.name) !== attribute.value) {
+              target.setAttribute(attribute.name, attribute.value);
+              updated = true;
+            }
+          if (updated) stats.Updated++;
+        }
+      } else {
+        live = source.cloneNode(false);
+        stats.Created++;
+      }
+      remap.set(source, live);
+      const position = next.positions.get(source);
+      if (position) committedPositions.set(live, position);
+      reconcile(live, Array.from(source.childNodes));
+      if (parent.childNodes[index] !== live)
+        parent.insertBefore(live, parent.childNodes[index] || null);
+      retained.push(live);
+    }
+    const wanted = new Set(retained);
+    for (const child of Array.from(parent.childNodes))
+      if (!wanted.has(child)) {
+        child.remove();
+        stats.Removed++;
+      }
+  }
+  reconcile(surface, Array.from(next.fragment.childNodes));
+  next.positions = committedPositions;
+  next.leaves = next.leaves.map((leaf) => ({
+    ...leaf,
+    node: remap.get(leaf.node)!,
+  }));
+  next.paragraphs = next.paragraphs.map((paragraph) => ({
+    ...paragraph,
+    node: remap.get(paragraph.node)! as HTMLElement,
+  }));
+  next.statistics = stats;
+  return next;
 }
 
 export function safeNavigationUri(value: unknown): string | undefined {
@@ -114,6 +216,14 @@ function applyStyle(element: HTMLElement, props: Record<string, any>): void {
   if (props.BreakPageBefore) s.breakBefore = "page";
   if (props.KeepTogether) s.breakInside = "avoid";
   if (props.KeepWithNext) s.breakAfter = "avoid";
+  if (props.Widows !== undefined)
+    s.widows = String(Math.max(1, Math.floor(Number(props.Widows) || 2)));
+  if (props.Orphans !== undefined)
+    s.orphans = String(Math.max(1, Math.floor(Number(props.Orphans) || 2)));
+  if (props.NoteReference) {
+    s.verticalAlign = "super";
+    s.fontSize = ".75em";
+  }
   if (props.BaselineAlignment === "Superscript") s.verticalAlign = "super";
   if (props.BaselineAlignment === "Subscript") s.verticalAlign = "sub";
   if (props.BorderBrush) s.borderColor = String(props.BorderBrush);
@@ -129,6 +239,7 @@ function applyStyle(element: HTMLElement, props: Record<string, any>): void {
 export function renderDocument(
   node: DocumentNode,
   owner: Document,
+  previousTemplates?: Map<string, HTMLElement>,
 ): RenderResult {
   const result: RenderResult = {
     fragment: owner.createDocumentFragment(),
@@ -136,6 +247,7 @@ export function renderDocument(
     leaves: [],
     paragraphs: [],
     length: 0,
+    templates: new Map(),
   };
   let position = 0;
   let blockSeen = false;
@@ -205,7 +317,20 @@ export function renderDocument(
         tag = "img";
         break;
     }
-    const element = owner.createElement(tag);
+    const cached = previousTemplates?.get(current.id);
+    const element =
+      cached?.localName === tag ? cached : owner.createElement(tag);
+    const cachedText =
+      current.type === "Run" && element.firstChild?.nodeType === 3
+        ? (element.firstChild as Text)
+        : null;
+    const cachedPlaceholder = isParagraph
+      ? element.querySelector<HTMLBRElement>(":scope > br[data-rt-placeholder]")
+      : null;
+    element.replaceChildren();
+    for (const attribute of Array.from(element.attributes))
+      element.removeAttribute(attribute.name);
+    result.templates!.set(current.id, element);
     element.dataset.rtId = current.id;
     element.dataset.rtType = current.type;
     applyStyle(element, props);
@@ -264,7 +389,8 @@ export function renderDocument(
       }
     }
     if (current.type === "Run") {
-      const text = owner.createTextNode(current.text || "");
+      const text = cachedText || owner.createTextNode(current.text || "");
+      if (text.data !== (current.text || "")) text.data = current.text || "";
       element.append(text);
       position += text.data.length;
       result.positions.set(text, { start, end: position });
@@ -314,7 +440,7 @@ export function renderDocument(
     }
     if (isParagraph) {
       if (!element.childNodes.length || start === position) {
-        const br = owner.createElement("br");
+        const br = cachedPlaceholder || owner.createElement("br");
         br.dataset.rtPlaceholder = "";
         element.append(br);
         result.positions.set(br, { start: position, end: position });

@@ -27,7 +27,7 @@ public sealed class AvaloniaRichTextTransport : IRichTextTransport
     private void OnMessage(object? sender, WebMessageReceivedEventArgs args)
     {
         // NativeWebView's callback does not carry a source URI; navigation is locked to the editor.
-        if (IsEditor(_webView.Source)) MessageReceived?.Invoke(args.Body);
+        if (IsEditor(_webView.Source) && args.Body is string body) MessageReceived?.Invoke(body);
     }
     private void OnNavigation(object? sender, WebViewNavigationStartingEventArgs args) { args.Cancel = !IsEditor(args.Request); }
     public async Task SendAsync(string json, CancellationToken cancellationToken = default)

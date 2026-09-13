@@ -162,17 +162,30 @@ Request example:
 
 Responses echo the `id` and contain `result` or `{ "error": { "code": "...", "message": "..." } }`. Events use `kind: "event"`, `event` and `payload`. `ready`/`documentChanged` carry revision, text length, undo/redo, read-only and selection state. `selectionChanged` carries start/end offsets and selected text. Full document change payloads are opt-in to avoid serializing a document for every edit.
 
-| Method                                            | Parameters                                             |
-| ------------------------------------------------- | ------------------------------------------------------ |
-| `getDocument`, `getText`, `getState`              | None                                                   |
-| `setDocument`                                     | `document` canonical JSON; optional `expectedRevision` |
-| `select`                                          | `start`, `end` UTF-16 offsets                          |
-| `insertText`                                      | `text`; optional `expectedRevision`                    |
-| `insertNode`                                      | `node` canonical JSON                                  |
-| `deleteBackward`, `deleteForward`, `undo`, `redo` | Optional `expectedRevision`                            |
-| `applyProperty`, `setParagraphProperty`           | `name`, `value`                                        |
-| `execute`                                         | `command`, optional `parameter`                        |
+| Method                                            | Parameters                                                          |
+| ------------------------------------------------- | ------------------------------------------------------------------- |
+| `getDocument`, `getText`, `getState`              | None                                                                |
+| `setDocument`                                     | `document` canonical JSON; optional `expectedRevision`              |
+| `select`                                          | `start`, `end` UTF-16 offsets                                       |
+| `insertText`                                      | `text`; optional `expectedRevision`                                 |
+| `insertNode`                                      | `node` canonical JSON                                               |
+| `deleteBackward`, `deleteForward`, `undo`, `redo` | Optional `expectedRevision`                                         |
+| `applyProperty`, `setParagraphProperty`           | `name`, `value`                                                     |
+| `execute`                                         | `command`, optional `parameter`                                     |
+| `getReviewState`                                  | None; returns tracking state, current author and revisions          |
+| `insertField`                                     | `type`, optional `argument`, `format`                               |
+| `updateFields`                                    | Optional `context`                                                  |
+| `setStory`                                        | `kind`, canonical `blocks`, optional `sectionId`                    |
+| `insertNote`                                      | `kind` (`Footnote`/`Endnote`), `content` string or canonical blocks |
+| `updateNote`                                      | `kind`, `id`, `content` string                                      |
+| `insertTableOfContents`                           | Optional `options` and `context`                                    |
+| `updateTableOfContents`                           | Optional `context`                                                  |
+| `mailMerge`                                       | `records`, optional `context` and `expectedRevision`                |
+
+Field context is JSON data: `PageNumber`, `PageCount`, `Locale`, `FileName`, `Data`, an ISO date/time string `Now`, and optional `PageMap` mapping document node IDs to positive page numbers. The bridge builds page lookup internally; it rejects caller-supplied resolver functions. TOC options are `MaxLevel` (1–9), `Title` and `IncludePageNumbers`. Headers and footers use `Headers`, `Footers`, `FirstPageHeader`, `FirstPageFooter`, `EvenPageHeader` or `EvenPageFooter` story kinds.
+
+Mail merge returns canonical JSON documents without changing the template. It remains available for read-only documents, caps each batch at 1,000 records and enforces the configured output-size budget. Split larger jobs into batches. `execute` also reaches the engine's `TrackChanges`, `CurrentAuthor`, `AcceptRevision`, `RejectRevision`, `AcceptAllRevisions` and `RejectAllRevisions` commands.
 
 All mutating methods accept optional `expectedRevision`; mismatch returns `revision_conflict`. Invalid documents, duplicate node IDs, unsupported node types, invalid offsets, excessive message size/depth, prototype keys, cycles and non-JSON values are rejected. The default input limit is 8 Mi UTF-16 code units, 100,000 document nodes and depth 64. `isReadOnly` is evaluated for each mutation. `HandleMessage` returns the response, while `Receive` also posts it. Invalid-envelope errors have `id: null`. Transport failures notify `TransportError`.
 
-These adapters are a migration surface for the implemented engine. They do not supply arbitrary native WPF controls inside document UI containers, native text services, a full Word object model, or native framework rendering. The shipped C# sources require compilation and platform testing in the application's target environment; that qualification was not performed in this Linux workspace.
+These adapters are a migration surface for the implemented engine. They do not supply arbitrary native WPF controls inside document UI containers, native text services, a full Word object model, or native framework rendering. Version 0.2 supplies packable native projects, a C# protocol suite that runs against the actual Node engine, and a Windows WPF/WebView2 smoke application with screenshot and JSON evidence. Shared, WPF and Avalonia code compile with the pinned dependencies; native UI runtime coverage is reported by the Desktop qualification workflow. WinUI/Avalonia UI execution, physical input, screen readers and physical GPU testing remain target-platform work. The official Avalonia NativeWebView dependency requires an Avalonia Accelerate runtime license. See the [native build and qualification guide](../adapters/dotnet/README.md).

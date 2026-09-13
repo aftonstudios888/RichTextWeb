@@ -1,36 +1,40 @@
 # Verification and measured performance
 
-Local verification performed on 2026-09-13 with Node.js 24.19.0, TypeScript 5.9.3 and headless Chromium 153 on Linux/x64. GitHub Actions repeats the release checks on Node 22 and 24 with its installed Chromium build.
+Verification uses Node.js 24.19.0, TypeScript 5.9.3 and Chromium 153 on Linux/x64. GitHub Actions repeats package and browser checks on Node 22 and 24, runs native shared/Avalonia builds on Linux, and compiles Windows adapters and exercises real WPF/WebView2 on Windows.
 
-## Tests
+## Automated coverage
 
-- **100 automated Node tests passed** across the document model, engine, browser-control SSR/API, MVVM/bridge/React SSR, text formats, DOCX and PDF.
-- **34 grouped browser checks passed.** Browser checks cover native typing and caret movement, selection preserved through toolbar focus, keyboard history, cross-paragraph edits, clipboard sanitation, simulated composition/undo, empty IME input, metadata/whitespace retention, concurrent composition conflicts, read-only/tab/zoom and all viewers.
-- React Strict Mode checks cover mounting/ref/settings, one callback per edit, revision subscriptions, replacement/read-only properties and unmount cleanup.
-- The sample is exercised through Markdown source application, ribbon formatting, table dialogs, DOCX download, PDF conversion/overlay/download, light/dark themes and a 390px mobile viewport. Additional review checks verify comments, bookmarks, table tools, persistence and read-only commands.
-- Package checks install the actual npm tarball into an isolated consumer and test ESM, CommonJS, strict TypeScript imports, every public entry point, optional React, cross-module constructor identity and standalone IIFE use. Both fresh-pack and supplied release-tarball modes pass.
-- A generated DOCX was independently opened with python-docx; generated PDF output was visually inspected through MuPDF.
+The Node suites cover model ownership and validation, live/snapshot text positions and structural symbols, editing, patch history, observer failures, tracked review, concurrent text operations, MVVM/React/bridge APIs, fields/notes/mail merge, format conversion, advanced DOCX stories/review/opaque parts, PDF generation, and independent PDF extraction.
 
-Run `npm run check`, then `npm run test:browser` after installing Chromium. `test-results/browser.json` records the grouped browser check count and browser version; screenshots include desktop, dark theme and mobile. Browser artifacts are uploaded by CI.
+The expanded browser suite currently has **57 grouped checks**. It covers native typing, selection/caret, clipboard sanitation, composition reconciliation, readonly guards, retained DOM identity, real measured page ranges/navigation, break/keep/widow rules, headers/footers/notes and overflow diagnostics. React Strict Mode, sample formatting/source/table/review controls, reusable toolbar dialogs, target changes, invalid page setup, stable TOC refresh, cached fields, two-peer offline edits/reconnection, independent PDF canvas/text search, pointer overlays/history, reconstructed native text editing, Unicode reflow export/download, themes and mobile overflow are included.
+
+Package tests install the actual npm tarball into an isolated application. They exercise ESM and CommonJS imports, shared constructors across entry points, strict TypeScript consumers including `/pdf`, `/document` and `/collaboration`, optional React, and the standalone editor bundle. The optional PDF bundle and assets are also exercised together with the separately bundled main editor in browser tests.
+
+Native checks build the shared C# client and run executable protocol tests against both controlled transports and the actual JavaScript engine in Node. WPF and Avalonia source projects compile against pinned official packages. The Windows CI job builds WPF and WinUI, runs a real WPF/WebView2 host, checks bridge editing/formatting/selection/undo/redo/readonly/revision notifications and DOM output, and captures PNG/JSON evidence. The release archive includes native package artifacts and the runnable WPF sample. An official Avalonia NativeWebView runtime license is required by its provider; compilation does not imply licensed runtime execution.
+
+Advanced DOCX output was independently opened with python-docx. The PDF import fixture was generated independently by ReportLab and includes out-of-order drawing operators, columns, Unicode, rotation and a graphics-only page. Its construction is documented next to the fixture. PDF export/reflow results are reparsed with PDF.js and browser-rendered for visual verification.
+
+Run `npm run check`, then `npm run test:browser` after installing Chromium. `test-results/browser.json` records actual grouped results and browser version; CI uploads screenshots and native evidence. Node's test runner reports the final count for the checked commit.
 
 ## Performance observation
 
-Workload: 1,000 paragraphs, 80,892 UTF-16 code units, 1,000 search matches. Local medians on Intel Xeon Platinum 8573C; 3 repetitions except 5 for insertion/search and 1 for binary exports:
+Workload: 1,000 paragraphs and 80,892 UTF-16 code units on the local Intel Xeon Platinum 8573C. Medians use three repetitions, five for insertion/search and one for binary exports:
 
 | Operation                       | Observed time |
 | ------------------------------- | ------------: |
-| Construct document and ID index |       12.4 ms |
-| Serialize canonical JSON        |        1.6 ms |
-| Parse canonical JSON            |        7.0 ms |
-| Insert five characters and undo |       46.0 ms |
+| Construct model and ID index    |        7.0 ms |
+| Serialize canonical JSON        |        1.5 ms |
+| Parse canonical JSON            |        6.0 ms |
+| Insert five characters and undo |       43.1 ms |
 | Find all 1,000 matches          |        0.4 ms |
-| Format 100 characters and undo  |       35.3 ms |
-| Export HTML                     |        3.5 ms |
-| Export Markdown                 |        1.9 ms |
-| Export DOCX                     |       34.2 ms |
+| Format 100 characters and undo  |       39.1 ms |
+| Export HTML                     |        3.0 ms |
+| Export Markdown                 |        1.3 ms |
+| Export DOCX                     |       34.8 ms |
+| Export PDF                      |      116.2 ms |
 
-These observations include allocation and history work where named. They are not latency guarantees or a statistical performance study. Engine edits and undo currently clone document snapshots; DOM rendering rebuilds the edited document surface. Large-document typing, sustained memory use and native browser layout are therefore separate performance concerns. `node scripts/benchmark.mjs --json` produces a reproducible report for the current environment.
+A separate regression test edits a 200,000-character run, verifies retained undo history below 1.5 KB, and preserves the original Run/Paragraph objects through undo/redo. Retained history uses reversible patches and compact text splices. Temporary canonical-tree cloning/diff discovery still scales with document size. Keyed rendering preserves unaffected live DOM and caches detached templates; indexing/layout traversal is not virtualized. The timings do not establish device typing latency or sustained large-session memory guarantees. `node scripts/benchmark.mjs --json` provides the repeatable workload.
 
-## Qualification not performed
+## Remaining qualification
 
-Real Windows WPF/WinUI or Avalonia native builds, physical mobile/stylus devices, real operating-system IMEs, screen readers, Firefox/WebKit, production-scale memory testing, exact Word render comparison, exhaustive native API conformance, and arbitrary third-party document corpora were not qualified. The tests validate the documented implementation; they do not establish full Word/WPF or Office-file fidelity.
+Exact Word render comparison, exhaustive WPF/native API conformance, WinUI/Avalonia runtime UI execution, physical mobile/stylus devices, actual OS IMEs, screen readers, Firefox/WebKit, production-scale collaboration/tombstone storage and arbitrary third-party Office/PDF corpora still require separate qualification. Browser page fragmentation and direct PDF generation remain different layout paths. The repository's tests establish its documented behavior, not complete Microsoft-engine parity.

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { RichTextEngine } from "../src/engine.js";
 import {
   FlowDocument,
   Paragraph,
@@ -22,6 +23,8 @@ import {
   BlockUIContainer,
   LineBreak,
   TextPointer,
+  TextPointerContext,
+  TextSymbolMap,
   LogicalDirection,
   Thickness,
   EventDispatcher,
@@ -390,4 +393,379 @@ test("empty container positions and cloned document revision are stable", () => 
   assert.equal(empty.ContentEnd.Offset, 0);
   document.FontSize = 20;
   assert.equal(document.Clone().Revision, 0);
+});
+
+test("live pointers rebase at insertion with forward and backward gravity before events", () => {
+  const run = new Run("hello"),
+    document = new FlowDocument(new Paragraph(run));
+  const forward = new TextPointer(document, 2, LogicalDirection.Forward);
+  const backward = new TextPointer(document, 2, LogicalDirection.Backward);
+  const end = document.ContentEnd,
+    start = run.ContentStart,
+    runEnd = run.ContentEnd;
+  let observed: number[] = [];
+  document.Changed.Subscribe(() => {
+    observed = [forward.Offset, backward.Offset, end.Offset];
+  });
+  run.Text = "heXllo";
+  assert.deepEqual(observed, [3, 2, 6]);
+  assert.equal(start.Offset, 0);
+  assert.equal(runEnd.Offset, 6);
+  run.Text = "hlo";
+  assert.equal(forward.Offset, 1);
+  assert.equal(backward.Offset, 1);
+  assert.equal(end.Offset, 3);
+});
+
+test("live pointers retain unchanged runs when separate surrounding paragraphs change", () => {
+  const first = new Run("first"),
+    middle = new Run("middle"),
+    last = new Run("last");
+  const document = new FlowDocument([
+    new Paragraph(first),
+    new Paragraph(middle),
+    new Paragraph(last),
+  ]);
+  const pointer = new TextPointer(document, 9);
+  document.Change(() => {
+    first.Text = "expanded first";
+    last.Text = "expanded last";
+  });
+  assert.equal(pointer.Offset, 18);
+  assert.equal(pointer.GetTextInRun(LogicalDirection.Forward), "dle");
+  document.Blocks.Insert(0, new Paragraph("intro"));
+  assert.equal(pointer.Offset, 24);
+  assert.equal(pointer.Parent, middle);
+});
+
+test("exact pre-batch edit ranges preserve middle anchors across disjoint changes in one run", () => {
+  const run = new Run("abc---def---ghi"),
+    document = new FlowDocument(new Paragraph(run));
+  const pointer = new TextPointer(document, 7);
+  document.SetPendingTextChanges([
+    { Start: 0, RemovedLength: 3, InsertedLength: 1 },
+    { Start: 12, RemovedLength: 3, InsertedLength: 4 },
+  ]);
+  document.Change(() => {
+    run.Text = "A---def---GHI!";
+  });
+  assert.equal(pointer.Offset, 5);
+  assert.equal(pointer.GetTextInRun(LogicalDirection.Forward), "ef---GHI!");
+  assert.throws(
+    () =>
+      document.SetPendingTextChanges([
+        { Start: 3, RemovedLength: 3, InsertedLength: 0 },
+        { Start: 4, RemovedLength: 1, InsertedLength: 0 },
+      ]),
+    /nonoverlapping/,
+  );
+});
+
+test("pointers survive canonical replacement and do not drift when formatting splits text runs", () => {
+  const run = new Run("abcdef"),
+    document = new FlowDocument(new Paragraph(run));
+  const pointer = new TextPointer(document, 4);
+  const json = document.ToJSON();
+  const first = json.children![0]!.children![0]!;
+  first.text = "ab";
+  json.children![0]!.children!.push({
+    type: "Run",
+    id: "split-suffix",
+    props: { FontWeight: "Bold" },
+    text: "cdef",
+  });
+  document.ReplaceWith(FlowDocument.FromJSON(json));
+  assert.equal(pointer.Offset, 4);
+  assert.equal(pointer.GetTextInRun(LogicalDirection.Forward), "ef");
+  document.ReplaceWith(new FlowDocument(new Paragraph("Xabcdef")));
+  assert.equal(pointer.Offset, 5);
+});
+
+test("pointer reads during a batch reflect edits while events stay batched", () => {
+  const run = new Run("abc"),
+    document = new FlowDocument(new Paragraph(run));
+  const pointer = new TextPointer(document, 2);
+  let events = 0;
+  document.Changed.Subscribe(() => events++);
+  document.BeginChange();
+  run.Text = "Xabc";
+  assert.equal(pointer.Offset, 3);
+  run.Text = "XYabc";
+  assert.equal(pointer.Offset, 4);
+  document.EndChange();
+  assert.equal(pointer.Offset, 4);
+  assert.equal(events, 1);
+});
+
+test("snapshots and disposed pointers retain their recorded coordinates and cannot edit", () => {
+  const run = new Run("abc"),
+    document = new FlowDocument(new Paragraph(run));
+  const live = new TextPointer(document, 1),
+    snapshot = live.CreateSnapshot(),
+    disposed = new TextPointer(document, 2);
+  disposed.Dispose();
+  run.Text = "Xabc";
+  assert.equal(live.Offset, 2);
+  assert.equal(snapshot.Offset, 1);
+  assert.equal(disposed.Offset, 2);
+  assert.equal(snapshot.IsLive, false);
+  assert.equal(snapshot.GetTextInRun(LogicalDirection.Forward), "bc");
+  assert.throws(() => snapshot.InsertTextInRun("bad"), /Snapshot/);
+});
+
+test("symbol offsets count UTF-16 code units and element edges independently", () => {
+  const run = new Run("A😀"),
+    paragraph = new Paragraph(run),
+    document = new FlowDocument(paragraph);
+  const map = document.GetSymbolMap();
+  assert.ok(map instanceof TextSymbolMap);
+  assert.equal(document.SymbolCount, 7);
+  assert.deepEqual(map.GetElementBounds(run), {
+    ElementStart: 1,
+    ContentStart: 2,
+    ContentEnd: 5,
+    ElementEnd: 6,
+  });
+  assert.equal(document.ContentStart.SymbolOffset, 0);
+  assert.equal(document.ContentEnd.SymbolOffset, 7);
+  assert.equal(run.ContentStart.Offset, 0);
+  assert.equal(run.ContentStart.SymbolOffset, 2);
+  assert.equal(run.ContentStart.GetPositionAtSymbolOffset(3)!.SymbolOffset, 5);
+  assert.equal(
+    document.ContentStart.GetSymbolOffsetToPosition(document.ContentEnd),
+    7,
+  );
+  assert.equal(
+    document.ContentStart.GetOffsetToPosition(document.ContentEnd),
+    3,
+  );
+  assert.equal(document.ContentStart.CompareTo(run.ContentStart), 0);
+  assert.equal(document.ContentStart.CompareSymbolTo(run.ContentStart), -1);
+  assert.equal(map.GetTextOffset(4), 2);
+  assert.equal(map.GetSymbolOffset(2), 4);
+  assert.equal(document.GetPositionAtSymbolOffset(8), null);
+  assert.throws(() => TextPointer.FromSymbolOffset(document, -1), /outside/);
+});
+
+test("structural context traversal visits tags, text and embedded content in both directions", () => {
+  const image = new Image("image.png");
+  const document = new FlowDocument(
+    new Paragraph([
+      new Run("ab"),
+      new Bold("c"),
+      new LineBreak(),
+      new InlineUIContainer(image),
+    ]),
+  );
+  const contexts: string[] = [];
+  let current: TextPointer | null = document.ContentStart;
+  while (current) {
+    contexts.push(current.GetPointerContext(LogicalDirection.Forward));
+    current = current.GetNextContextPosition(LogicalDirection.Forward);
+  }
+  assert.deepEqual(contexts, [
+    "ElementStart",
+    "ElementStart",
+    "Text",
+    "ElementEnd",
+    "ElementStart",
+    "ElementStart",
+    "Text",
+    "ElementEnd",
+    "ElementEnd",
+    "ElementStart",
+    "ElementEnd",
+    "ElementStart",
+    "EmbeddedElement",
+    "ElementEnd",
+    "ElementEnd",
+    "None",
+  ]);
+  const reversed: string[] = [];
+  current = document.ContentEnd;
+  while (current) {
+    reversed.push(current.GetPointerContext(LogicalDirection.Backward));
+    current = current.GetNextContextPosition(LogicalDirection.Backward);
+  }
+  assert.deepEqual(
+    reversed,
+    [...contexts.slice(0, -1)].reverse().concat("None"),
+  );
+  assert.equal(
+    image.ElementStart.GetAdjacentElement(LogicalDirection.Forward),
+    image,
+  );
+  assert.equal(
+    image.ElementStart.GetPointerContext(LogicalDirection.Forward),
+    TextPointerContext.EmbeddedElement,
+  );
+  assert.equal(
+    document.ContentStart.GetPointerContext(LogicalDirection.Backward),
+    TextPointerContext.None,
+  );
+});
+
+test("table columns do not contribute symbols and embedded UI children count once", () => {
+  const table = new Table(
+      new TableRowGroup(new TableRow(new TableCell(new Paragraph("cell")))),
+    ),
+    document = new FlowDocument(table);
+  const before = document.SymbolCount;
+  table.Columns.Add(new TableColumn(120));
+  assert.equal(document.SymbolCount, before);
+  const embedded = new InlineUIContainer(new Image("image"));
+  const paragraph = new Paragraph(embedded);
+  const standalone = new FlowDocument(paragraph);
+  assert.equal(standalone.SymbolCount, 5);
+  assert.equal(standalone.Text, "\uFFFC");
+  assert.throws(() => table.Columns.Get(0).ContentStart, /not part/);
+});
+
+test("GetTextInRun stops at structure and supports caller-provided UTF-16 buffers", () => {
+  const run = new Run("abcdef"),
+    document = new FlowDocument(new Paragraph([run, new Bold("tail")]));
+  const pointer = TextPointer.FromSymbolOffset(
+    document,
+    run.ContentStart.SymbolOffset + 3,
+  );
+  assert.equal(pointer.GetTextInRun(LogicalDirection.Forward), "def");
+  assert.equal(pointer.GetTextInRun(LogicalDirection.Backward), "abc");
+  assert.equal(pointer.GetTextRunLength(LogicalDirection.Backward), 3);
+  const buffer = ["_", "_", "_", "_"];
+  assert.equal(
+    pointer.GetTextInRun(LogicalDirection.Backward, buffer, 1, 2),
+    2,
+  );
+  assert.deepEqual(buffer, ["_", "b", "c", "_"]);
+  const units = new Uint16Array(2);
+  pointer.GetTextInRun(LogicalDirection.Forward, units, 0, 2);
+  assert.deepEqual([...units], [100, 101]);
+  assert.equal(run.ElementStart.GetTextInRun(LogicalDirection.Forward), "");
+  assert.throws(
+    () => pointer.GetTextInRun(LogicalDirection.Forward, [], 0, 1),
+    /buffer/,
+  );
+});
+
+test("insertion context excludes document and inter-paragraph edges and respects graphemes", () => {
+  const run = new Run("e\u0301👩‍💻Z"),
+    paragraph = new Paragraph(run),
+    document = new FlowDocument([paragraph, new Paragraph("tail")]);
+  assert.equal(document.ContentStart.IsAtInsertionPosition, false);
+  assert.equal(paragraph.ElementEnd.IsAtInsertionPosition, false);
+  assert.equal(run.ContentStart.IsAtInsertionPosition, true);
+  assert.equal(new TextPointer(document, 1).IsAtInsertionPosition, false);
+  assert.equal(
+    new TextPointer(document, 0).GetNextInsertionPosition(
+      LogicalDirection.Forward,
+    )!.Offset,
+    2,
+  );
+  assert.equal(
+    new TextPointer(document, 2).GetNextInsertionPosition(
+      LogicalDirection.Forward,
+    )!.Offset,
+    7,
+  );
+  assert.equal(
+    document.ContentStart.GetInsertionPosition(LogicalDirection.Forward)!
+      .Offset,
+    0,
+  );
+  assert.equal(
+    document.ContentEnd.GetInsertionPosition(LogicalDirection.Backward)!.Offset,
+    document.Text.length,
+  );
+  assert.equal(run.ContentStart.Parent, run);
+  assert.equal(run.ContentStart.Paragraph, paragraph);
+});
+
+test("TextPointer run editing mutates actual text and preserves neighboring formatting", () => {
+  const run = new Run("abcd"),
+    bold = new Bold("tail"),
+    document = new FlowDocument(new Paragraph([run, bold]));
+  const pointer = new TextPointer(document, 2);
+  pointer.InsertTextInRun("X");
+  assert.equal(document.Text, "abXcdtail");
+  assert.equal(pointer.Offset, 3);
+  assert.equal(pointer.DeleteTextInRun(-2), 2);
+  assert.equal(document.Text, "acdtail");
+  assert.equal(pointer.Offset, 1);
+  assert.equal(pointer.DeleteTextInRun(99), 2);
+  assert.equal(document.Text, "atail");
+  assert.equal(bold.Inlines.Get(0).Text, "tail");
+  const empty = new Paragraph();
+  document.Blocks.Add(empty);
+  empty.ContentStart.InsertTextInRun("empty");
+  assert.equal(empty.Text, "empty");
+});
+
+test("precise pointer edits preserve insertion gravity even when every character repeats", () => {
+  const run = new Run("aaaa"),
+    document = new FlowDocument(new Paragraph(run));
+  const forward = new TextPointer(document, 2),
+    backward = new TextPointer(document, 2, LogicalDirection.Backward);
+  forward.InsertTextInRun("a");
+  assert.equal(forward.Offset, 3);
+  assert.equal(backward.Offset, 2);
+  assert.equal(forward.DeleteTextInRun(-1), 1);
+  assert.equal(forward.Offset, 2);
+  assert.equal(backward.Offset, 2);
+  assert.throws(
+    () =>
+      document.SetPendingTextChanges([
+        { Start: 1, RemovedLength: 0, InsertedLength: 1 },
+        { Start: 1, RemovedLength: 0, InsertedLength: 1 },
+      ]),
+    /nonoverlapping/,
+  );
+});
+
+test("live pointer insertion gravity survives engine undo and redo with repeated text", () => {
+  const document = new FlowDocument(new Paragraph("aaaa")),
+    engine = new RichTextEngine(document);
+  const forward = new TextPointer(document, 2),
+    backward = new TextPointer(document, 2, LogicalDirection.Backward);
+  engine.Select(2);
+  engine.InsertText("a");
+  assert.deepEqual([forward.Offset, backward.Offset], [3, 2]);
+  engine.Undo();
+  assert.deepEqual([forward.Offset, backward.Offset], [2, 2]);
+  engine.Redo();
+  assert.deepEqual([forward.Offset, backward.Offset], [3, 2]);
+  engine.Dispose();
+});
+
+test("insertion positions do not enter embedded UI or LineBreak element interiors", () => {
+  const embedded = new InlineUIContainer(new Image("image")),
+    line = new LineBreak();
+  const document = new FlowDocument(
+    new Paragraph([new Run("a"), embedded, line, new Run("b")]),
+  );
+  assert.equal(embedded.ContentStart.IsAtInsertionPosition, false);
+  assert.equal(line.ContentStart.IsAtInsertionPosition, false);
+  assert.equal(embedded.ElementStart.IsAtInsertionPosition, true);
+  assert.equal(embedded.ElementEnd.IsAtInsertionPosition, true);
+  assert.equal(document.GetSymbolMap().Text, "a\uFFFC\nb");
+});
+
+test("snapshot traversal remains within its captured text after the live document is shortened", () => {
+  const run = new Run("abcdef"),
+    paragraph = new Paragraph(run),
+    document = new FlowDocument(paragraph);
+  const snapshot = new TextPointer(document, 3).CreateSnapshot();
+  document.Blocks.Clear();
+  assert.equal(
+    snapshot.GetPositionAtOffset(2)!.GetTextInRun(LogicalDirection.Forward),
+    "f",
+  );
+  assert.equal(snapshot.DocumentEnd.Offset, 6);
+  assert.equal(snapshot.DocumentEnd.IsLive, false);
+  assert.equal(
+    snapshot
+      .GetNextContextPosition(LogicalDirection.Forward)!
+      .GetPointerContext(LogicalDirection.Forward),
+    TextPointerContext.ElementEnd,
+  );
+  assert.equal(snapshot.Paragraph, paragraph);
 });

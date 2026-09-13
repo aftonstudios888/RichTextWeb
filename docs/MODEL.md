@@ -74,9 +74,78 @@ A document's `Changed` event contains `Document`, `Revision` and `Changes`. Nest
 
 Plain text uses UTF-16 offsets, matching JavaScript strings and DOM text positions. Every leaf `Paragraph` contributes its inline text, including empty paragraphs. Leaf paragraph/block-container units are separated by one newline across section, list and table boundaries. Containers do not contribute extra separators. `Run` contributes its text, `LineBreak` contributes a newline, and `Image`, `InlineUIContainer` and `BlockUIContainer` each contribute one U+FFFC object replacement character.
 
-`ContentStart` and `ContentEnd` return `TextPointer` values. `GetPositionAtOffset` returns `null` outside the document, `CompareTo` returns -1/0/1, and `GetOffsetToPosition` returns a signed distance. Cross-document comparisons throw. Insertion-position navigation avoids splitting UTF-16 surrogate pairs. It does not implement complete Unicode grapheme, bidi caret or shaping behavior; browser editing and the editing engine handle their respective editing paths.
+Version 0.2 makes `TextPointer` positions live. Insertions and deletions update an existing pointer before document `Changed` subscribers run. `LogicalDirection.Forward` places a pointer after text inserted exactly at its position; `Backward` keeps it before that insertion. Element boundary pointers retain the same surviving element through collection edits and canonical replacement. Unchanged runs are tracked by ID, preserving anchors when other paragraphs change. This follows the position-tracking model described in the [official TextPointer documentation](https://learn.microsoft.com/en-us/dotnet/api/system.windows.documents.textpointer?view=windowsdesktop-10.0).
 
-Pointers are immutable offset snapshots. Construct new positions after changing the document; a pointer is not a WPF live position that tracks subsequent insertions and deletions. WPF symbol offsets count structural tokens and are therefore different from RichTextWeb plain-text offsets. There is no claim of identical WPF `TextPointer` behavior.
+```ts
+import {
+  FlowDocument,
+  Paragraph,
+  Run,
+  TextPointer,
+  LogicalDirection,
+} from "@wieslawsoltes/richtextweb/core";
+
+const run = new Run("abcd");
+const document = new FlowDocument(new Paragraph(run));
+const after = new TextPointer(document, 2, LogicalDirection.Forward);
+const before = new TextPointer(document, 2, LogicalDirection.Backward);
+after.InsertTextInRun("X");
+console.log(document.Text, before.Offset, after.Offset); // abXcd, 2, 3
+
+const snapshot = after.CreateSnapshot();
+run.Text = "prefix " + run.Text;
+console.log(after.Offset, snapshot.Offset); // 10, 3
+```
+
+`CreateSnapshot()` explicitly captures nontracking text and structural coordinates. `new TextPointer(document, offset, direction, { TrackChanges: false })` also creates a snapshot. `Dispose()` stops a live pointer from tracking changes; snapshots cannot edit a document. Live registrations use weak references, so documents do not keep otherwise unreferenced pointers alive. A structural index is built lazily and invalidated when text or child collections change.
+
+Batches update pointers before their final notification. Reading a pointer inside a batch synchronizes it with the current intermediate tree. Direct `Run.Text` assignment provides replacement text, not an edit operation; the model infers a contiguous change using the common prefix and suffix. For multiple distant changes within one run, an adapter can supply `document.SetPendingTextChanges([{ Start, RemovedLength, InsertedLength }, ...])` before applying the batch. Ranges use the original UTF-16 coordinates, must be sorted and disjoint, and cannot share a start. They are consumed once during the next pointer synchronization. Their total length change must match the resulting text; otherwise the model uses its ordinary inference. Avoid reading pointers partway through an adapter batch whose ranges describe the complete result. `InsertTextInRun` and `DeleteTextInRun` supply exact ranges themselves, including repeated-character edits.
+
+## Structural symbols and traversal
+
+UTF-16 APIs retain their 0.1 units: `Offset`, `GetPositionAtOffset`, `GetOffsetToPosition`, and `CompareTo`. A separate symbol coordinate supports document-tree traversal. WPF counts an opening or closing text-element edge, each UTF-16 code unit in a Run, and an embedded UI element as symbols. A UI element's contents do not add further symbols. RichTextWeb applies those counting rules to its supported hierarchy, excluding the FlowDocument root and table-column metadata. See [Microsoft's symbol definition](https://learn.microsoft.com/en-us/dotnet/api/system.windows.documents.textpointer?view=windowsdesktop-10.0).
+
+| API                                                          | Meaning                                                            |
+| ------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `document.GetSymbolMap()`                                    | Immutable index of the current text and structural segments        |
+| `document.SymbolCount`                                       | Total structural symbols                                           |
+| `pointer.SymbolOffset`                                       | Pointer position in structural symbols                             |
+| `TextPointer.FromSymbolOffset(document, offset, direction?)` | Construct an absolute structural position                          |
+| `document.GetPositionAtSymbolOffset(offset, direction?)`     | Absolute position, or `null` outside the document                  |
+| `pointer.GetPositionAtSymbolOffset(delta, direction?)`       | Relative structural movement                                       |
+| `pointer.GetSymbolOffsetToPosition(other)`                   | Signed symbol distance                                             |
+| `pointer.CompareSymbolTo(other)`                             | Structural ordering, including edges at equal plain-text positions |
+| `map.GetTextOffset(symbolOffset)`                            | Convert a structural position to its plain-text coordinate         |
+| `map.GetSymbolOffset(textOffset, direction?)`                | Resolve a plain-text position toward adjacent text content         |
+| `map.GetElementBounds(elementOrId)`                          | ElementStart, ContentStart, ContentEnd and ElementEnd in symbols   |
+
+For `new FlowDocument(new Paragraph(new Run("A😀")))`, the plain length is 3 and the symbol count is 7: two paragraph edges, two run edges and three UTF-16 code units. `Run.ContentStart` has symbol offset 2 and plain offset 0. `ContentStart` uses backward gravity and `ContentEnd` uses forward gravity. The former matches the documented [TextElement.ContentStart direction](https://learn.microsoft.com/en-us/dotnet/api/system.windows.documents.textelement.contentstart?view=windowsdesktop-10.0).
+
+Paragraph separators and `LineBreak` newlines are synthetic plain-text characters, while their structural representation uses element edges. Several structural positions can therefore have the same plain offset. At nested container boundaries, the element's plain `ContentStart`/`ContentEnd` denotes its visible content range; a raw symbol-to-text conversion may fall on the other side of a synthetic separator. Preserve symbol offsets when exact structural placement matters. A direct `Image` contributes one embedded symbol as a portable extension; an explicit UI container contributes its own two edges and one embedded symbol when populated. An empty UI container retains the existing U+FFFC plain-text placeholder but contributes only its two structural edges.
+
+`GetPointerContext(direction)` returns `None`, `Text`, `ElementStart`, `ElementEnd`, or `EmbeddedElement`. `GetNextContextPosition(direction)` crosses one structural edge or the remainder of an adjacent text run. `GetAdjacentElement`, `Parent`, `Paragraph`, `DocumentStart`, `DocumentEnd`, `IsInSameDocument`, and `GetPropertyValue` support model inspection. This follows the categories and directional behavior described by [GetPointerContext](https://learn.microsoft.com/en-us/dotnet/api/system.windows.documents.textpointer.getpointercontext?view=windowsdesktop-10.0).
+
+```ts
+import {
+  LogicalDirection,
+  TextPointerContext,
+} from "@wieslawsoltes/richtextweb/core";
+
+let position: TextPointer | null = document.ContentStart;
+while (position) {
+  if (
+    position.GetPointerContext(LogicalDirection.Forward) ===
+    TextPointerContext.Text
+  ) {
+    console.log(position.GetTextInRun(LogicalDirection.Forward));
+  }
+  position = position.GetNextContextPosition(LogicalDirection.Forward);
+}
+```
+
+`GetTextInRun(direction)` stops at the next structural edge; it does not flatten adjacent formatted runs. The buffer overload accepts `string[]` or `Uint16Array`, an array index and a maximum count, and returns the number copied. Backward reads retain normal character order and copy the nearest requested characters. `GetTextRunLength` returns the adjacent UTF-16 length. These operations correspond to the official [GetTextInRun contract](https://learn.microsoft.com/en-us/dotnet/api/system.windows.documents.textpointer.gettextinrun?view=windowsdesktop-10.0).
+
+`IsAtInsertionPosition`, `GetInsertionPosition`, and `GetNextInsertionPosition` exclude positions outside paragraph content and avoid grapheme splits through `Intl.Segmenter` where available. The fallback avoids surrogate-pair splits. This is logical insertion navigation, not a bidi-aware visual caret or native WPF font/shaping implementation. `InsertTextInRun` edits an existing run or creates one at a valid inline boundary. `DeleteTextInRun` removes a signed number of UTF-16 code units from the adjacent run without crossing structural edges. Direct pointer edits are model mutations; applications that require undo grouping should route user commands through the editing engine.
 
 ## Scope
 

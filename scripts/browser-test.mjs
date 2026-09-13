@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import { runControlBrowserChecks } from "../tests/control.browser.mjs";
 import { runReactBrowserChecks } from "../tests/react.browser.mjs";
 import { runReviewBrowserChecks } from "../tests/review.browser.mjs";
+import { runToolbarBrowserChecks } from "../tests/toolbar.browser.mjs";
+import { runPDFBrowserChecks } from "../tests/pdf.browser.mjs";
 const port = process.env.PORT || "4190";
 const external = process.env.BROWSER_TEST_URL;
 const base = external || `http://127.0.0.1:${port}`;
@@ -86,7 +88,7 @@ try {
   results.push("Markdown source editing updates model");
   await page.getByRole("button", { name: "Home", exact: true }).click();
   await page.evaluate(() => richTextStudio.editor.Select(13, 18));
-  await page.locator('[data-command="bold"]').click();
+  await page.locator('[data-command="ToggleBold"]').click();
   assert(
     await page.evaluate(() =>
       richTextStudio.RT.toHTML(richTextStudio.editor.Document).includes(
@@ -105,6 +107,29 @@ try {
   );
   results.push("Table insertion from dialog");
   results.push(...(await runReviewBrowserChecks(page)));
+  results.push(...(await runToolbarBrowserChecks(page)));
+  await page.getByRole("button", { name: "Developer", exact: true }).click();
+  await page.locator('[data-command="collaboration-demo"]').click();
+  await page.locator(".collaboration-dialog [data-network]").click();
+  await page.evaluate(() => {
+    const dialog = document.querySelector(".collaboration-dialog");
+    dialog.editors[0].Engine.Select(0);
+    dialog.editors[0].Engine.InsertText("Ada: ");
+    dialog.editors[1].Engine.Select(0);
+    dialog.editors[1].Engine.InsertText("Grace: ");
+  });
+  await page.locator(".collaboration-dialog [data-network]").click();
+  const peers = await page.evaluate(() =>
+    document
+      .querySelector(".collaboration-dialog")
+      .editors.map((editor) => editor.Document.Text),
+  );
+  assert.equal(peers[0], peers[1]);
+  assert(peers[0].includes("Ada: ") && peers[0].includes("Grace: "));
+  await page.locator(".collaboration-dialog [data-close]").click();
+  results.push(
+    "Two reusable editors converge after offline concurrent edits and reconnection",
+  );
   await page.evaluate(() => richTextStudio.loadTemplate("welcome"));
   await page.locator("#export-primary").click();
   const pendingDownload = page.waitForEvent("download");
@@ -115,14 +140,23 @@ try {
   await page.getByRole("button", { name: "File", exact: true }).click();
   await page.locator('[data-command="pdf-tools"]').click();
   await page.waitForFunction(
-    () => document.querySelector("[data-page]")?.options.length > 0,
+    () => document.querySelector("rich-pdf-editor")?.Engine?.PageCount > 0,
   );
-  await page.locator("[data-add]").click();
+  await page.evaluate(async () => {
+    const pdf = document.querySelector("rich-pdf-editor");
+    await pdf.AddText(0, "Reviewed", { x: 50, y: 50, fontSize: 14 });
+  });
   const pendingPDF = page.waitForEvent("download");
-  await page.locator("[data-save]").click();
+  await page.locator('rich-pdf-editor [data-command="save"]').click();
   assert((await pendingPDF).suggestedFilename().endsWith(".pdf"));
   await page.locator("[data-close]").click();
   results.push("PDF workspace conversion, overlay and download");
+  results.push(...(await runPDFBrowserChecks(page)));
+  await page.evaluate(() => richTextStudio.loadTemplate("welcome"));
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await page.waitForFunction(
+    () => !document.getElementById("toast")?.classList.contains("visible"),
+  );
   await page.locator("#theme-toggle").click();
   assert(
     await page.locator("body").evaluate((el) => el.classList.contains("dark")),

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Description>Avalonia NativeWebView host for RichTextWeb. Applications require an Avalonia Accelerate WebView license.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Shared/RichTextWeb.Bridge.csproj" />
+    <PackageReference Include="Avalonia" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Controls.WebView" Version="$(AvaloniaWebViewVersion)" />
+  </ItemGroup>
+</Project>

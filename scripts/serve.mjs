@@ -5,6 +5,8 @@ const root = resolve(process.env.SERVE_DIR || "site");
 const mime = {
   ".html": "text/html",
   ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".wasm": "application/wasm",
   ".css": "text/css",
   ".json": "application/json",
   ".svg": "image/svg+xml",

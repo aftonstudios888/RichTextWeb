@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <!-- This host facade contains no XAML/PRI resources; the consuming app builds its own resources. -->
+    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
+    <GenerateLibraryLayout>false</GenerateLibraryLayout>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Description>WinUI 3 WebView2 host for the RichTextWeb JavaScript rich text engine.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Shared/RichTextWeb.Bridge.csproj" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="$(WindowsAppSdkVersion)" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="$(WebView2Version)" />
+    <Compile Include="../WebView2/CoreWebView2Transport.cs" Link="CoreWebView2Transport.cs" />
+  </ItemGroup>
+</Project>
