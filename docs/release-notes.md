@@ -10,7 +10,7 @@ RichTextWeb 0.2.0 expands the shared engine and reusable controls with document 
 - Optional PDF.js import/search/preview, reusable PDF editor with overlays/history/page operations, editable text reconstruction and export to a new PDF.
 - Packable shared/WPF/WinUI/Avalonia projects, real C#/Node tests, Windows WPF/WebView2 smoke checks, and a runnable native sample.
 
-Validation: 172 Node tests, 57 grouped Chromium checks, installed ESM/CommonJS/strict TypeScript/standalone consumers, independent PDF fixture round trips, and seven executable C# protocol groups. Distribution is gated by both JavaScript and native CI, including actual WPF/WebView2 execution and WinUI compilation on Windows.
+Validation: 172 Node tests, 57 grouped Chromium checks, installed ESM/CommonJS/strict TypeScript/standalone consumers, independent PDF fixture round trips, seven executable C# protocol groups, and 10 real Windows WPF/WebView2 smoke checks. Distribution is gated by both JavaScript and native CI, including actual WPF/WebView2 execution and WinUI compilation on Windows.
 
 Install with `npm install @wieslawsoltes/richtextweb@0.2.0`. The main editor remains standalone; the optional `/pdf` entry point has its own browser module and worker/font assets. Release archives include browser builds, source, the sample, native NuGet packages/sample/qualification evidence, and checksums. npm publication uses provenance and verifies the published bytes against the release tarball.
 

@@ -12,6 +12,7 @@
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <Description>WinUI 3 WebView2 host for the RichTextWeb JavaScript rich text engine.</Description>
+    <AddPriFileDependsOn>$(AddPriFileDependsOn);RichTextWebCheckPriForPack</AddPriFileDependsOn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../Shared/RichTextWeb.Bridge.csproj" />
@@ -19,4 +20,11 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="$(WebView2Version)" />
     <Compile Include="../WebView2/CoreWebView2Transport.cs" Link="CoreWebView2Transport.cs" />
   </ItemGroup>
+  <!-- NuGet otherwise includes the WinUI SDK's default PRI path even when generation is disabled.
+       Check during Pack, after a normal build or against existing outputs for NoBuild=true. -->
+  <Target Name="RichTextWebCheckPriForPack" Condition="!Exists('$(ProjectPriFullPath)')">
+    <PropertyGroup>
+      <IncludeProjectPriFile>false</IncludeProjectPriFile>
+    </PropertyGroup>
+  </Target>
 </Project>
