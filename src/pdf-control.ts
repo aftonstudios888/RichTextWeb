@@ -1,5 +1,13 @@
 import { FlowDocument } from "./model.js";
 import { registerRichTextWeb, type RichTextBox } from "./control.js";
+import type { RichTextToolbar } from "./toolbar.js";
+import type {
+  PDFTextOperator,
+  PDFTextInspection,
+  PDFTextReplacementOptions,
+  PDFSourceTextReplaceOptions,
+  PDFTextEditResult,
+} from "./pdf-operators.js";
 import {
   PDFEditor,
   toPDF,
@@ -64,6 +72,11 @@ export class PDFEditorControl extends HTMLElementBase {
   private _matches: PDFSearchMatch[] = [];
   private _matchIndex = -1;
   private _imageBytes: Uint8Array | null = null;
+  private _sourceOperators: PDFTextOperator[] = [];
+  private _selectedSourceId: string | null = null;
+  private _flowToolbar: RichTextToolbar | null = null;
+  /** Optional font options used by the built-in original-text replacement tools. */
+  SourceTextReplacementOptions: PDFTextReplacementOptions = {};
   private _drag: {
     x: number;
     y: number;
@@ -94,7 +107,15 @@ export class PDFEditorControl extends HTMLElementBase {
         <input class="text-input" data-input="text" value="New text" aria-label="Overlay text"><label>Size <input type="number" data-input="size" min="1" max="200" value="14" aria-label="Overlay text size"></label><input type="color" data-input="color" value="#2563eb" aria-label="Overlay color">
         <span class="divider"></span><button data-command="undo" data-mutates>Undo</button><button data-command="redo" data-mutates>Redo</button><button data-command="rotate" data-mutates>Rotate</button><button data-command="move-before" data-mutates>Move earlier</button><button data-command="move-after" data-mutates>Move later</button><button data-command="delete" data-mutates>Delete page</button><button data-command="add-page" data-mutates>Blank page</button><button data-command="insert-pages" data-mutates>Import pages</button>
       </div>
-      <div class="toolbar pdf-tools" role="search"><input data-input="find" class="find-input" type="search" placeholder="Find in PDF" aria-label="Find in PDF"><button data-command="find" data-loaded>Find</button><button data-command="find-next" data-loaded>Next match</button><span data-label="matches"></span></div>
+      <div class="toolbar pdf-tools source-tools" role="toolbar" aria-label="Original PDF text editing">
+        <button data-command="inspect-source" data-loaded>Original text</button>
+        <select data-input="source-operator" aria-label="Original PDF text" style="max-width:280px"><option value="">Inspect this page to select original text</option></select>
+        <input data-input="source-replacement" class="text-input" aria-label="Replace original text" placeholder="Replacement text">
+        <button data-command="replace-source" data-mutates>Replace original</button><button data-command="remove-source" data-mutates>Remove original</button>
+        <label><input data-input="preserve-advance" type="checkbox" checked>Keep following positions</label>
+        <span data-label="source-font"></span>
+      </div>
+      <div class="toolbar pdf-tools" role="search"><input data-input="find" class="find-input" type="search" placeholder="Find in PDF" aria-label="Find in PDF"><button data-command="find" data-loaded>Find</button><button data-command="find-next" data-loaded>Next match</button><span data-label="matches"></span><button data-command="replace-source-matches" data-mutates>Replace source matches</button></div>
       <div class="viewport" part="viewport"><div class="empty">Open a PDF to view, search, annotate, organize pages, or reconstruct editable flow text.</div><div class="page" part="page" data-tool="select" hidden><canvas aria-label="PDF page"></canvas><div class="textLayer"></div><div class="search-layer"></div></div></div>
       <div class="flow-wrap" hidden><div class="flow-note">Editable text reconstructed from PDF. Paragraphs and reading order are inferred. Images and original page layout remain in the source PDF.</div></div>
       <div class="status" role="status" aria-live="polite">No document loaded.</div>
@@ -118,6 +139,9 @@ export class PDFEditorControl extends HTMLElementBase {
     });
     shadow.addEventListener("change", (event) => {
       const input = event.target as HTMLInputElement;
+      if (input.dataset.input === "source-operator") {
+        this.SelectTextOperator(input.value);
+      }
       if (input.dataset.input === "page") {
         try {
           this.PageIndex = Number(input.value) - 1;
@@ -149,6 +173,13 @@ export class PDFEditorControl extends HTMLElementBase {
           this.reportError(error),
         );
       }
+    });
+    this._textContainer?.addEventListener("dblclick", (event) => {
+      if (this.Tool !== "select") return;
+      const point = this.localPoint(event as PointerEvent);
+      void this.selectSourceAt(point.x, point.y).catch((error) =>
+        this.reportError(error),
+      );
     });
     this._page?.addEventListener("pointerdown", (event) =>
       this.pointerDown(event),
@@ -201,6 +232,7 @@ export class PDFEditorControl extends HTMLElementBase {
     if (!Number.isInteger(value) || value < 0 || value >= this.PageCount)
       throw new RangeError("Invalid PDF page index.");
     this._pageIndex = value;
+    this.clearSourceSelection();
     this.updateToolbar();
     void this.render().catch((error) => this.reportError(error));
     this.emit("pagechange", { pageIndex: value, pageCount: this.PageCount });
@@ -293,9 +325,13 @@ export class PDFEditorControl extends HTMLElementBase {
     this._future = [];
     this._pageIndex = 0;
     this._pageCache.clear();
+    this.clearSourceSelection();
     this._matches = [];
     this._matchIndex = -1;
     this._flowDocument = null;
+    this._flowToolbar?.Dispose();
+    this._flowToolbar?.remove();
+    this._flowToolbar = null;
     this._flow?.remove();
     this._flow?.Dispose();
     this._flow = null;
@@ -310,7 +346,7 @@ export class PDFEditorControl extends HTMLElementBase {
     this.emit("pdfload", { pageCount: this.PageCount, engine });
   }
 
-  /** Saves the source PDF plus page/overlay edits. Flow edits are exported separately. */
+  /** Saves the source PDF plus original-text, page and overlay edits. Flow edits are exported separately. */
   async Save(): Promise<Uint8Array> {
     return this.requiredEngine().Save();
   }
@@ -328,11 +364,123 @@ export class PDFEditorControl extends HTMLElementBase {
     this._handle = handle;
     this._pageIndex = Math.min(this._pageIndex, this.PageCount - 1);
     this._pageCache.clear();
+    this.clearSourceSelection();
     this._matches = [];
     this._matchIndex = -1;
     await previous?.destroy();
     this.updateToolbar();
     await this.render();
+  }
+
+  /** Inspect original page/Form text operators independently of PDF.js display grouping. */
+  async GetTextOperators(pageIndex?: number): Promise<PDFTextInspection> {
+    await this._pending.catch(() => undefined);
+    return this.requiredEngine().GetTextOperators(pageIndex);
+  }
+
+  get SelectedTextOperator(): PDFTextOperator | null {
+    return (
+      this._sourceOperators.find(
+        (item) => item.id === this._selectedSourceId,
+      ) ?? null
+    );
+  }
+
+  /** Populate the control's original-text picker for the current page. */
+  async InspectSourceText(): Promise<PDFTextInspection> {
+    const pageIndex = this.PageIndex;
+    const result = await this.GetTextOperators(pageIndex);
+    if (pageIndex !== this.PageIndex || this._disposed) return result;
+    this._sourceOperators = result.operators;
+    const picker = this.shadowRoot?.querySelector<HTMLSelectElement>(
+      '[data-input="source-operator"]',
+    );
+    if (picker) {
+      picker.replaceChildren();
+      for (const item of result.operators) {
+        const option = this.ownerDocument.createElement("option");
+        option.value = item.id;
+        option.textContent = `${item.editable ? "" : "Unavailable: "}${item.text ?? item.reason ?? "Undecodable text"}`;
+        option.title = item.reason ?? item.fontName;
+        picker.append(option);
+      }
+      if (!result.operators.length) {
+        const option = this.ownerDocument.createElement("option");
+        option.value = "";
+        option.textContent = "No source text operators on this page";
+        picker.append(option);
+      }
+    }
+    this.SelectTextOperator(
+      result.operators.find((item) => item.editable)?.id ??
+        result.operators[0]?.id ??
+        "",
+    );
+    const unsupported =
+      result.operators.filter((item) => !item.editable).length +
+      result.diagnostics.length;
+    this.status(
+      `${result.operators.length} original text operators. ${unsupported ? `${unsupported} unsupported source sections; select one for details.` : "Choose text or double-click a text line to replace its original content."}`,
+    );
+    return result;
+  }
+
+  SelectTextOperator(operatorId: string): void {
+    const selected = this._sourceOperators.find(
+      (item) => item.id === operatorId,
+    );
+    if (operatorId && !selected)
+      throw new RangeError("Inspect source text before selecting an operator.");
+    this._selectedSourceId = selected?.id ?? null;
+    const picker = this.shadowRoot?.querySelector<HTMLSelectElement>(
+      '[data-input="source-operator"]',
+    );
+    if (picker) picker.value = this._selectedSourceId ?? "";
+    const replacement = this.input("source-replacement");
+    if (replacement) replacement.value = selected?.text ?? "";
+    const label = this.shadowRoot?.querySelector('[data-label="source-font"]');
+    if (label)
+      label.textContent = selected
+        ? `${selected.fontName} · ${selected.fontSize} pt`
+        : "";
+    if (selected?.reason) this.status(selected.reason, true);
+    this.drawSearch();
+    this.updateToolbar();
+    this.emit("pdftextselectionchange", { operator: selected ?? null });
+  }
+
+  async ReplaceTextOperator(
+    pageIndex: number,
+    operatorId: string,
+    replacement: string,
+    options: PDFTextReplacementOptions = {},
+  ): Promise<PDFTextEditResult> {
+    let result!: PDFTextEditResult;
+    await this.mutate(async (engine) => {
+      result = await engine.ReplaceTextOperator(
+        pageIndex,
+        operatorId,
+        replacement,
+        options,
+      );
+      return result.operatorsChanged > 0;
+    });
+    this.emit("pdftextchange", result);
+    return result;
+  }
+
+  async ReplaceSourceText(
+    query: string,
+    replacement: string,
+    options: PDFSourceTextReplaceOptions = {},
+  ): Promise<PDFTextEditResult> {
+    let result!: PDFTextEditResult;
+    await this.mutate(async (engine) => {
+      result = await engine.ReplaceSourceText(query, replacement, options);
+      return result.operatorsChanged > 0;
+    });
+    this.emit("pdftextchange", result);
+    return result;
   }
 
   AddText(
@@ -422,7 +570,16 @@ export class PDFEditorControl extends HTMLElementBase {
         event.stopPropagation();
         this.emit("flowdocumentchange", { document: this._flowDocument });
       });
-      this.shadowRoot.querySelector(".flow-wrap")?.append(this._flow);
+      this._flowToolbar?.Dispose();
+      this._flowToolbar?.remove();
+      this._flowToolbar = this.ownerDocument.createElement(
+        "rich-text-toolbar",
+      ) as RichTextToolbar;
+      this._flowToolbar.Editor = this._flow;
+      this._flowToolbar.Mode = "all";
+      this.shadowRoot
+        .querySelector(".flow-wrap")
+        ?.append(this._flowToolbar, this._flow);
     }
     this.ViewMode = "flow";
     this.status(
@@ -514,6 +671,7 @@ export class PDFEditorControl extends HTMLElementBase {
     this._renderVersion++;
     this._renderTask?.cancel();
     this._textLayer?.cancel();
+    this._flowToolbar?.Dispose();
     this._flow?.Dispose();
     await this._handle?.destroy();
     this._handle = null;
@@ -566,13 +724,13 @@ export class PDFEditorControl extends HTMLElementBase {
   }
 
   private mutate(
-    action: (engine: PDFEditor) => void | Promise<void>,
+    action: (engine: PDFEditor) => void | boolean | Promise<void | boolean>,
   ): Promise<void> {
     return this.enqueue(async () => {
       this.assertWritable();
       const before = await this.Save();
       try {
-        await action(this.requiredEngine());
+        if ((await action(this.requiredEngine())) === false) return;
         await this.Refresh();
       } catch (error) {
         this._engine = await PDFEditor.Load(before);
@@ -680,6 +838,46 @@ export class PDFEditorControl extends HTMLElementBase {
     }
   }
 
+  private clearSourceSelection(): void {
+    this._sourceOperators = [];
+    this._selectedSourceId = null;
+    const picker = this.shadowRoot?.querySelector<HTMLSelectElement>(
+      '[data-input="source-operator"]',
+    );
+    if (picker) {
+      const option = this.ownerDocument.createElement("option");
+      option.value = "";
+      option.textContent = "Inspect this page to select original text";
+      picker.replaceChildren(option);
+    }
+    const label = this.shadowRoot?.querySelector('[data-label="source-font"]');
+    if (label) label.textContent = "";
+  }
+
+  private async selectSourceAt(x: number, y: number): Promise<void> {
+    if (!this._viewport) return;
+    if (!this._sourceOperators.length) await this.InspectSourceText();
+    const point = this._viewport.convertToPdfPoint(x, y);
+    const selected = this._sourceOperators
+      .filter(
+        (item) =>
+          item.bounds &&
+          point[0] >= item.bounds.x - 3 &&
+          point[0] <= item.bounds.x + item.bounds.width + 3 &&
+          point[1] >= item.bounds.y - 3 &&
+          point[1] <= item.bounds.y + item.bounds.height + 3,
+      )
+      .sort(
+        (a, b) =>
+          a.bounds!.width * a.bounds!.height -
+          b.bounds!.width * b.bounds!.height,
+      )[0];
+    if (selected) {
+      this.SelectTextOperator(selected.id);
+      this.input("source-replacement")?.focus();
+    }
+  }
+
   private drawSearch(): void {
     if (!this._searchLayer || !this._viewport) return;
     this._searchLayer.replaceChildren();
@@ -696,6 +894,26 @@ export class PDFEditorControl extends HTMLElementBase {
       });
       this._searchLayer!.append(element);
     });
+    const selected = this.SelectedTextOperator;
+    if (selected?.bounds && selected.pageIndex === this.PageIndex) {
+      const b = selected.bounds;
+      const rectangle = [
+        ...this._viewport.convertToViewportPoint(b.x, b.y),
+        ...this._viewport.convertToViewportPoint(b.x + b.width, b.y + b.height),
+      ];
+      const element = this.ownerDocument.createElement("div");
+      element.className = "source-selection";
+      Object.assign(element.style, {
+        position: "absolute",
+        border: "2px solid var(--pdf-accent)",
+        background: "#2563eb22",
+        left: `${Math.min(rectangle[0], rectangle[2])}px`,
+        top: `${Math.min(rectangle[1], rectangle[3])}px`,
+        width: `${Math.max(3, Math.abs(rectangle[2] - rectangle[0]))}px`,
+        height: `${Math.max(3, Math.abs(rectangle[3] - rectangle[1]))}px`,
+      });
+      this._searchLayer.append(element);
+    }
   }
 
   private updateToolbar(): void {
@@ -728,6 +946,8 @@ export class PDFEditorControl extends HTMLElementBase {
         !this._engine ||
         this.PageIndex >= this.PageCount - 1,
       delete: this.IsReadOnly || this.PageCount <= 1,
+      "replace-source": this.IsReadOnly || !this.SelectedTextOperator?.editable,
+      "remove-source": this.IsReadOnly || !this.SelectedTextOperator?.editable,
     };
     for (const [command, disabled] of Object.entries(specific)) {
       const button = shadow.querySelector<HTMLButtonElement>(
@@ -840,6 +1060,43 @@ export class PDFEditorControl extends HTMLElementBase {
       ];
       await this.ReorderPages(order);
       this.PageIndex = next;
+    }
+    if (command === "inspect-source") await this.InspectSourceText();
+    if (command === "replace-source" || command === "remove-source") {
+      const selected = this.SelectedTextOperator;
+      if (!selected) throw new Error("Select original PDF text first.");
+      const replacement =
+        command === "remove-source"
+          ? ""
+          : (this.input("source-replacement")?.value ?? "");
+      await this.ReplaceTextOperator(
+        selected.pageIndex,
+        selected.id,
+        replacement,
+        {
+          ...this.SourceTextReplacementOptions,
+          expectedText: selected.text ?? undefined,
+          preserveAdvance: this.input("preserve-advance")?.checked !== false,
+        },
+      );
+      await this.InspectSourceText();
+      this.status(
+        "Original PDF text updated. Save PDF to download the modified content streams.",
+      );
+    }
+    if (command === "replace-source-matches") {
+      const result = await this.ReplaceSourceText(
+        this.input("find")?.value ?? "",
+        this.input("source-replacement")?.value ?? "",
+        {
+          ...this.SourceTextReplacementOptions,
+          preserveAdvance: this.input("preserve-advance")?.checked !== false,
+        },
+      );
+      await this.InspectSourceText();
+      this.status(
+        `Replaced ${result.occurrences} original text matches in ${result.pages.length} pages.`,
+      );
     }
     if (command === "find") await this.Find(this.input("find")?.value ?? "");
     if (command === "find-next" && this._matches.length) {

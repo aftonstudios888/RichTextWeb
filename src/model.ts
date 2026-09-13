@@ -179,85 +179,444 @@ export class Thickness {
     };
   }
 }
-export interface PropertyMetadata<T = any> {
-  DefaultValue?: T;
-  Inherits?: boolean;
-  ValidateValueCallback?: (value: T) => boolean;
-  PropertyChangedCallback?: (
-    owner: DependencyObject,
-    event: PropertyChangedEvent<T>,
-  ) => void;
+export type PropertyChangedCallback<T = any> = (
+  owner: DependencyObject,
+  event: PropertyChangedEvent<T>,
+) => void;
+export type CoerceValueCallback<T = any> = (
+  owner: DependencyObject,
+  baseValue: T,
+) => T | symbol;
+
+/** Metadata accepts object initializers as well as the familiar .NET constructor form. */
+export class PropertyMetadata<T = any> {
+  declare DefaultValue?: T;
+  declare Inherits?: boolean;
+  /** Compatibility initializer. Validation belongs to the registration and cannot be overridden. */
+  declare ValidateValueCallback?: (value: T) => boolean;
+  declare PropertyChangedCallback?: PropertyChangedCallback<T>;
+  declare CoerceValueCallback?: CoerceValueCallback<T>;
+  declare IsSealed?: boolean;
+  constructor(
+    defaultValue?: T,
+    propertyChangedCallback?: PropertyChangedCallback<T>,
+    coerceValueCallback?: CoerceValueCallback<T>,
+  ) {
+    if (arguments.length) this.DefaultValue = defaultValue;
+    if (propertyChangedCallback)
+      this.PropertyChangedCallback = propertyChangedCallback;
+    if (coerceValueCallback) this.CoerceValueCallback = coerceValueCallback;
+  }
+}
+export class UIPropertyMetadata<T = any> extends PropertyMetadata<T> {
+  declare IsAnimationProhibited?: boolean;
+}
+export const FrameworkPropertyMetadataOptions = {
+  None: 0,
+  AffectsMeasure: 1,
+  AffectsArrange: 2,
+  AffectsParentMeasure: 4,
+  AffectsParentArrange: 8,
+  AffectsRender: 16,
+  Inherits: 32,
+  OverridesInheritanceBehavior: 64,
+  NotDataBindable: 128,
+  BindsTwoWayByDefault: 256,
+  Journal: 1024,
+  SubPropertiesDoNotAffectRender: 2048,
+} as const;
+export class FrameworkPropertyMetadata<T = any> extends UIPropertyMetadata<T> {
+  declare AffectsMeasure?: boolean;
+  declare AffectsArrange?: boolean;
+  declare AffectsParentMeasure?: boolean;
+  declare AffectsParentArrange?: boolean;
+  declare AffectsRender?: boolean;
+  declare OverridesInheritanceBehavior?: boolean;
+  declare IsNotDataBindable?: boolean;
+  declare BindsTwoWayByDefault?: boolean;
+  declare Journal?: boolean;
+  declare SubPropertiesDoNotAffectRender?: boolean;
+  declare DefaultUpdateSourceTrigger?:
+    "Default" | "PropertyChanged" | "LostFocus" | "Explicit";
+  constructor(
+    defaultValue?: T,
+    flags = 0,
+    propertyChangedCallback?: PropertyChangedCallback<T>,
+    coerceValueCallback?: CoerceValueCallback<T>,
+  ) {
+    super(defaultValue, propertyChangedCallback, coerceValueCallback);
+    if (!arguments.length) delete this.DefaultValue;
+    for (const [name, value] of Object.entries(
+      FrameworkPropertyMetadataOptions,
+    ))
+      if (value && flags & value)
+        (this as any)[name === "NotDataBindable" ? "IsNotDataBindable" : name] =
+          true;
+  }
 }
 export interface PropertyChangedEvent<T = any> {
   Property: string;
+  DependencyProperty?: DependencyProperty<T>;
   OldValue: T;
   NewValue: T;
+  IsInherited?: boolean;
+}
+function typeChain(owner: unknown): unknown[] {
+  const result: unknown[] = [];
+  let current =
+    typeof owner === "object" && owner !== null ? owner.constructor : owner;
+  while (current && current !== Function.prototype) {
+    result.push(current);
+    current =
+      typeof current === "function" ? Object.getPrototypeOf(current) : null;
+  }
+  return result;
+}
+function normalizeMetadata<T>(
+  metadata: PropertyMetadata<T> | T,
+): PropertyMetadata<T> {
+  return metadata !== null &&
+    typeof metadata === "object" &&
+    (metadata instanceof PropertyMetadata ||
+      Object.keys(metadata).length === 0 ||
+      [
+        "DefaultValue",
+        "Inherits",
+        "ValidateValueCallback",
+        "PropertyChangedCallback",
+        "CoerceValueCallback",
+      ].some((key) => key in metadata))
+    ? (metadata as PropertyMetadata<T>)
+    : { DefaultValue: metadata as T };
+}
+function defaultForType(type: unknown): any {
+  return type === Number ? 0 : type === Boolean ? false : null;
+}
+function freezeMetadata<T>(metadata: PropertyMetadata<T>): PropertyMetadata<T> {
+  const result = Object.assign(
+    Object.create(Object.getPrototypeOf(metadata)),
+    metadata,
+  );
+  if (Object.prototype.hasOwnProperty.call(result, "DefaultValue"))
+    result.DefaultValue = cloneValue(result.DefaultValue);
+  result.IsSealed = true;
+  // Default object graphs are cloned by GetValue. Freeze the exposed metadata copy too.
+  const freeze = (value: any): void => {
+    if (value && typeof value === "object" && !Object.isFrozen(value)) {
+      for (const child of Object.values(value)) freeze(child);
+      Object.freeze(value);
+    }
+  };
+  freeze(result.DefaultValue);
+  return Object.freeze(result);
+}
+const readOnlyKeys = new WeakMap<DependencyProperty, DependencyPropertyKey>();
+export class DependencyPropertyKey<T = any> {
+  /** @internal Keys are created by RegisterReadOnly; a forged key never authorizes writes. */
+  constructor(readonly DependencyProperty: DependencyProperty<T>) {}
+  OverrideMetadata(ownerType: unknown, metadata: PropertyMetadata<T>): void {
+    this.DependencyProperty.OverrideMetadata(ownerType, metadata, this);
+  }
 }
 export class DependencyProperty<T = any> {
   static readonly UnsetValue = Symbol("UnsetValue");
-  private static registry = new Map<string, DependencyProperty>();
+  private static registry = new Map<string, DependencyProperty[]>();
+  private static storageRegistry = new Map<string, DependencyProperty>();
   readonly Name: string;
   readonly PropertyType: unknown;
   readonly OwnerType: unknown;
   readonly DefaultMetadata: PropertyMetadata<T>;
+  readonly ValidateValueCallback?: (value: T) => boolean;
+  readonly ReadOnly: boolean;
+  readonly IsAttached: boolean;
+  /** @internal JSON storage preserves independent same-name property registrations. */
+  readonly StorageName: string;
+  private metadata = new Map<unknown, PropertyMetadata<T>>();
+  private usedTypes = new Set<unknown>();
   constructor(
     name: string,
     metadata: PropertyMetadata<T> = {},
     propertyType?: unknown,
     ownerType?: unknown,
+    validateValueCallback?: (value: T) => boolean,
+    readOnly = false,
+    attached = false,
   ) {
-    if (!name) throw new TypeError("Dependency property name cannot be empty.");
+    if (typeof name !== "string" || !name)
+      throw new TypeError("Dependency property name cannot be empty.");
     this.Name = name;
-    this.DefaultMetadata = metadata;
     this.PropertyType = propertyType;
     this.OwnerType = ownerType;
+    this.ReadOnly = readOnly;
+    this.IsAttached = attached;
+    this.ValidateValueCallback =
+      validateValueCallback ?? metadata.ValidateValueCallback;
+    const normalized = Object.assign(
+      Object.create(Object.getPrototypeOf(metadata)),
+      metadata,
+    );
+    if (!("DefaultValue" in normalized) && propertyType !== undefined)
+      normalized.DefaultValue = defaultForType(propertyType);
+    if (
+      normalized.DefaultValue !== undefined &&
+      !this.IsValidValue(normalized.DefaultValue)
+    )
+      throw new RangeError(`Invalid default value for ${name}.`);
+    this.DefaultMetadata = freezeMetadata(normalized);
+    this.metadata.set(ownerType, this.DefaultMetadata);
+    const existing = DependencyProperty.registry.get(name);
+    const ownerName =
+      typeof ownerType === "function"
+        ? ownerType.name
+        : String(ownerType ?? "Attached");
+    this.StorageName = existing?.length ? `${ownerName}.${name}` : name;
+    if (DependencyProperty.storageRegistry.has(this.StorageName))
+      throw new Error(
+        `A dependency property storage name is already registered: ${this.StorageName}. Use a distinct owner type name.`,
+      );
+  }
+  private static register<T>(
+    name: string,
+    propertyType: unknown,
+    ownerType: unknown,
+    metadata: PropertyMetadata<T> | T,
+    validate?: (value: T) => boolean,
+    readOnly = false,
+    attached = false,
+  ): DependencyProperty<T> {
+    if (this.registry.get(name)?.some((p) => p.metadata.has(ownerType)))
+      throw new Error(`${name} is already registered for this owner.`);
+    const property = new DependencyProperty(
+      name,
+      normalizeMetadata(metadata),
+      propertyType,
+      ownerType,
+      validate,
+      readOnly,
+      attached,
+    );
+    this.registry.set(name, [...(this.registry.get(name) ?? []), property]);
+    this.storageRegistry.set(property.StorageName, property);
+    if (metadata instanceof PropertyMetadata) Object.freeze(metadata);
+    return property;
   }
   static Register<T = any>(
     name: string,
     propertyType?: unknown,
     ownerType?: unknown,
     metadata: PropertyMetadata<T> | T = {},
+    validateValueCallback?: (value: T) => boolean,
   ): DependencyProperty<T> {
-    const normalized =
-      metadata &&
-      typeof metadata === "object" &&
-      ("DefaultValue" in metadata ||
-        "Inherits" in metadata ||
-        "ValidateValueCallback" in metadata ||
-        "PropertyChangedCallback" in metadata)
-        ? (metadata as PropertyMetadata<T>)
-        : metadata &&
-            typeof metadata === "object" &&
-            Object.keys(metadata).length === 0
-          ? {}
-          : { DefaultValue: metadata as T };
-    const property = new DependencyProperty<T>(
+    return this.register(
       name,
-      normalized,
       propertyType,
       ownerType,
+      metadata,
+      validateValueCallback,
     );
-    this.registry.set(name, property);
-    return property;
   }
   static RegisterAttached<T = any>(
     name: string,
     propertyType?: unknown,
     ownerType?: unknown,
     metadata: PropertyMetadata<T> | T = {},
+    validateValueCallback?: (value: T) => boolean,
   ): DependencyProperty<T> {
-    return this.Register(name, propertyType, ownerType, metadata);
-  }
-  static Find(name: string): DependencyProperty | undefined {
-    return this.registry.get(name);
-  }
-  AddOwner(ownerType: unknown): DependencyProperty<T> {
-    return new DependencyProperty(
-      this.Name,
-      this.DefaultMetadata,
-      this.PropertyType,
+    return this.register(
+      name,
+      propertyType,
       ownerType,
+      metadata,
+      validateValueCallback,
+      false,
+      true,
     );
+  }
+  static RegisterReadOnly<T = any>(
+    name: string,
+    propertyType?: unknown,
+    ownerType?: unknown,
+    metadata: PropertyMetadata<T> | T = {},
+    validateValueCallback?: (value: T) => boolean,
+  ): DependencyPropertyKey<T> {
+    const property = this.register(
+      name,
+      propertyType,
+      ownerType,
+      metadata,
+      validateValueCallback,
+      true,
+    );
+    const key = new DependencyPropertyKey(property);
+    readOnlyKeys.set(property, key);
+    return key;
+  }
+  static RegisterAttachedReadOnly<T = any>(
+    name: string,
+    propertyType?: unknown,
+    ownerType?: unknown,
+    metadata: PropertyMetadata<T> | T = {},
+    validateValueCallback?: (value: T) => boolean,
+  ): DependencyPropertyKey<T> {
+    const property = this.register(
+      name,
+      propertyType,
+      ownerType,
+      metadata,
+      validateValueCallback,
+      true,
+      true,
+    );
+    const key = new DependencyPropertyKey(property);
+    readOnlyKeys.set(property, key);
+    return key;
+  }
+  static Find(
+    name: string,
+    ownerType?: unknown,
+  ): DependencyProperty | undefined {
+    const candidates = this.registry.get(name);
+    for (const owner of typeChain(ownerType)) {
+      const match = candidates?.find((p) => p.metadata.has(owner));
+      if (match) return match;
+    }
+    const stored = this.storageRegistry.get(name);
+    if (stored && stored.StorageName !== stored.Name) return stored;
+    return ownerType === undefined
+      ? (stored ?? candidates?.[0])
+      : candidates?.find(
+          (p) => p.IsAttached || typeof p.OwnerType !== "function",
+        );
+  }
+  /** @internal */ static GetRegisteredProperties(): readonly DependencyProperty[] {
+    return [...this.storageRegistry.values()];
+  }
+  IsValidType(value: unknown): boolean {
+    const matches = (type: unknown): boolean => {
+      if (type === undefined || type === Object) return true;
+      if (Array.isArray(type)) return type.some(matches);
+      if (type === Number) return typeof value === "number";
+      if (type === Boolean) return typeof value === "boolean";
+      if (value === null) return true;
+      if (type === String) return typeof value === "string";
+      // Portable thickness accepts the CSS-friendly numeric shorthand and its JSON representation.
+      if (type === Thickness)
+        return (
+          typeof value === "number" ||
+          (!!value &&
+            typeof value === "object" &&
+            ["Left", "Top", "Right", "Bottom"].every((k) =>
+              Number.isFinite((value as any)[k]),
+            ))
+        );
+      return typeof type !== "function" || value instanceof (type as any);
+    };
+    return (
+      value !== DependencyProperty.UnsetValue && matches(this.PropertyType)
+    );
+  }
+  IsValidValue(value: unknown): boolean {
+    return (
+      this.IsValidType(value) &&
+      (!this.ValidateValueCallback || this.ValidateValueCallback(value as T))
+    );
+  }
+  GetMetadata(ownerType: unknown): PropertyMetadata<T> {
+    for (const owner of typeChain(ownerType)) {
+      const metadata = this.metadata.get(owner);
+      if (metadata) return metadata;
+    }
+    return this.DefaultMetadata;
+  }
+  /** @internal */ _getMetadataForUse(ownerType: unknown): PropertyMetadata<T> {
+    this.usedTypes.add(ownerType);
+    return this.GetMetadata(ownerType);
+  }
+  OverrideMetadata(
+    ownerType: unknown,
+    metadata: PropertyMetadata<T>,
+    key?: DependencyPropertyKey<T>,
+  ): void {
+    if (this.ReadOnly && readOnlyKeys.get(this) !== key)
+      throw new Error(`${this.Name} requires its read-only property key.`);
+    if (ownerType === undefined || ownerType === null)
+      throw new TypeError("An owner type is required.");
+    if (this.metadata.has(ownerType))
+      throw new Error(
+        `Metadata for ${this.Name} is already registered on this owner.`,
+      );
+    for (const used of this.usedTypes)
+      if (typeChain(used).includes(ownerType))
+        throw new Error(`Metadata for ${this.Name} cannot change after use.`);
+    if (
+      metadata.ValidateValueCallback &&
+      metadata.ValidateValueCallback !== this.ValidateValueCallback
+    )
+      throw new Error("Validation callbacks cannot be overridden in metadata.");
+    const base = this.GetMetadata(
+      typeof ownerType === "function"
+        ? Object.getPrototypeOf(ownerType)
+        : undefined,
+    );
+    const merged = Object.assign(
+      Object.create(Object.getPrototypeOf(metadata)),
+      base,
+      metadata,
+    );
+    if (base.Inherits) merged.Inherits = true;
+    if (base.PropertyChangedCallback && metadata.PropertyChangedCallback) {
+      const before = base.PropertyChangedCallback,
+        after = metadata.PropertyChangedCallback;
+      merged.PropertyChangedCallback = (
+        owner: DependencyObject,
+        event: PropertyChangedEvent<T>,
+      ) => {
+        const errors: unknown[] = [];
+        try {
+          before(owner, event);
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          after(owner, event);
+        } catch (error) {
+          errors.push(error);
+        }
+        if (errors.length) throw errors[0];
+      };
+    }
+    if (
+      merged.DefaultValue !== undefined &&
+      !this.IsValidValue(merged.DefaultValue)
+    )
+      throw new RangeError(`Invalid default value for ${this.Name}.`);
+    this.metadata.set(ownerType, freezeMetadata(merged));
+    if (metadata instanceof PropertyMetadata) Object.freeze(metadata);
+  }
+  AddOwner(
+    ownerType: unknown,
+    metadata?: PropertyMetadata<T>,
+  ): DependencyProperty<T> {
+    if (
+      DependencyProperty.registry
+        .get(this.Name)
+        ?.some((p) => p !== this && p.metadata.has(ownerType))
+    )
+      throw new Error(`${this.Name} is already registered for this owner.`);
+    if (this.metadata.has(ownerType))
+      throw new Error(`${this.Name} already has this owner.`);
+    this.OverrideMetadata(
+      ownerType,
+      metadata ?? {},
+      readOnlyKeys.get(this) as DependencyPropertyKey<T> | undefined,
+    );
+    return this;
+  }
+  ToString(): string {
+    return this.Name;
+  }
+  toString(): string {
+    return this.Name;
   }
 }
 
@@ -266,6 +625,7 @@ const inherited = new Set([
   "FontSize",
   "FontWeight",
   "FontStyle",
+  "FontStretch",
   "Foreground",
   "FlowDirection",
   "Language",
@@ -277,6 +637,7 @@ const defaults: Record<string, any> = {
   FontSize: 16,
   FontWeight: "Normal",
   FontStyle: "Normal",
+  FontStretch: "Normal",
   TextDecorations: "None",
   Foreground: "#111827",
   Background: "transparent",
@@ -316,6 +677,20 @@ const positiveInteger = new Set([
 ]);
 function cloneValue<T>(value: T): T {
   if (value === undefined || value === null) return value;
+  // Formatting reads overwhelmingly return primitives. Preserve JSON's -0 normalization
+  // while avoiding a stringify/parse allocation for immutable scalar values.
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value))
+    return (value === 0 ? 0 : value) as T;
+  // Unstyled nodes serialize an empty property bag on every document snapshot.
+  // Custom prototypes and toJSON hooks retain the complete serialization path below.
+  if (
+    typeof value === "object" &&
+    Object.getPrototypeOf(value) === Object.prototype &&
+    Object.keys(value).length === 0 &&
+    !("toJSON" in value)
+  )
+    return {} as T;
   let serialized: string | undefined;
   try {
     serialized = JSON.stringify(value, (_key, item) => {
@@ -347,43 +722,180 @@ function equalValue(a: unknown, b: unknown): boolean {
       JSON.stringify(a) === JSON.stringify(b))
   );
 }
+export const BaseValueSource = {
+  Default: "Default",
+  Inherited: "Inherited",
+  Style: "Style",
+  StyleTrigger: "StyleTrigger",
+  Local: "Local",
+} as const;
+export interface ValueSource {
+  BaseValueSource: (typeof BaseValueSource)[keyof typeof BaseValueSource];
+  IsCoerced: boolean;
+  IsCurrent: boolean;
+  IsExpression: boolean;
+  IsAnimated: boolean;
+}
+export interface LocalValueEntry {
+  Property: string | DependencyProperty;
+  Value: any;
+}
+export class LocalValueEnumerator implements Iterable<LocalValueEntry> {
+  private index = -1;
+  constructor(private readonly entries: readonly LocalValueEntry[]) {}
+  get Count(): number {
+    return this.entries.length;
+  }
+  get Current(): LocalValueEntry {
+    if (this.index < 0 || this.index >= this.entries.length)
+      throw new Error("Enumerator is not positioned on an entry.");
+    const entry = this.entries[this.index]!;
+    return { Property: entry.Property, Value: cloneValue(entry.Value) };
+  }
+  MoveNext(): boolean {
+    return ++this.index < this.entries.length;
+  }
+  Reset(): void {
+    this.index = -1;
+  }
+  *[Symbol.iterator](): Iterator<LocalValueEntry> {
+    for (const entry of this.entries)
+      yield { Property: entry.Property, Value: cloneValue(entry.Value) };
+  }
+}
+interface EffectivePropertyValue {
+  value: any;
+  source: ValueSource["BaseValueSource"];
+  coerced: boolean;
+}
+export class DependencyPropertyHelper {
+  static GetValueSource(
+    owner: DependencyObject,
+    property: string | DependencyProperty,
+  ): ValueSource {
+    return owner.GetValueSource(property);
+  }
+}
 export class DependencyObject {
   protected values: Record<string, any> = {};
+  private currentValues = new Map<string, any>();
+  private styleValues = new Map<string, any>();
+  private triggerValues = new Map<string, any>();
+  private effectiveValues = new Map<string, EffectivePropertyValue>();
+  private evaluating = new Set<string>();
+  private retainedEffective = new Map<string, any>();
+  // Monotonic marker keeps ordinary detached document construction out of current-value subtree walks.
+  private hasCurrentValuesInSubtree = false;
   readonly PropertyChanged = new EventDispatcher<PropertyChangedEvent>();
   protected get InheritanceParent(): DependencyObject | null {
     return null;
   }
-  GetValue<T = any>(property: string | DependencyProperty<T>): T {
-    const name = typeof property === "string" ? property : property.Name;
-    if (Object.prototype.hasOwnProperty.call(this.values, name))
-      return cloneValue(this.values[name]);
-    const definition =
-      typeof property === "string" ? DependencyProperty.Find(name) : property;
-    if (
-      (definition?.DefaultMetadata.Inherits ?? inherited.has(name)) &&
-      this.InheritanceParent
-    )
-      return this.InheritanceParent.GetValue(property);
-    return cloneValue(
-      definition?.DefaultMetadata.DefaultValue !== undefined
-        ? definition.DefaultMetadata.DefaultValue
-        : defaults[name],
-    );
+  protected get InheritanceChildren(): readonly DependencyObject[] {
+    return [];
   }
-  SetValue<T = any>(property: string | DependencyProperty<T>, value: T): void {
-    const name = typeof property === "string" ? property : property.Name;
-    if (!name || typeof name !== "string")
+  private resolve(
+    property: string | DependencyProperty | DependencyPropertyKey,
+  ): {
+    name: string;
+    key: string;
+    definition?: DependencyProperty;
+    metadata: PropertyMetadata;
+  } {
+    const candidate =
+      property instanceof DependencyPropertyKey
+        ? property.DependencyProperty
+        : property;
+    const name = typeof candidate === "string" ? candidate : candidate.Name;
+    if (typeof name !== "string" || !name)
       throw new TypeError("A property name is required.");
-    if (value === undefined || value === DependencyProperty.UnsetValue) {
-      this.ClearValue(property);
-      return;
-    }
     const definition =
-      typeof property === "string" ? DependencyProperty.Find(name) : property;
-    if (
-      definition?.DefaultMetadata.ValidateValueCallback &&
-      !definition.DefaultMetadata.ValidateValueCallback(value)
-    )
+      typeof candidate === "string"
+        ? DependencyProperty.Find(name, this.constructor)
+        : candidate;
+    return {
+      name: definition?.Name ?? name,
+      key: definition?.StorageName ?? name,
+      definition,
+      metadata: definition?._getMetadataForUse(this.constructor) ?? {
+        DefaultValue: defaults[name],
+        Inherits: inherited.has(name),
+      },
+    };
+  }
+  private evaluate(
+    property: string | DependencyProperty,
+  ): EffectivePropertyValue {
+    const { key, definition, metadata } = this.resolve(property);
+    const cached = this.effectiveValues.get(key);
+    if (cached) return cached;
+    if (this.evaluating.has(key))
+      throw new Error(`Cyclic coercion for ${definition?.Name ?? key}.`);
+    this.evaluating.add(key);
+    try {
+      let value: any, source: EffectivePropertyValue["source"];
+      if (Object.prototype.hasOwnProperty.call(this.values, key)) {
+        value = this.values[key];
+        source = "Local";
+      } else if (this.triggerValues.has(key)) {
+        value = this.triggerValues.get(key);
+        source = "StyleTrigger";
+      } else if (this.styleValues.has(key)) {
+        value = this.styleValues.get(key);
+        source = "Style";
+      } else if (metadata.Inherits && this.InheritanceParent) {
+        const parent = this.InheritanceParent.evaluate(property);
+        // A parent's metadata default is not an inherited value; derived defaults stay effective.
+        if (
+          parent.source !== "Default" ||
+          this.InheritanceParent.currentValues.has(key)
+        ) {
+          value = parent.value;
+          source = "Inherited";
+        } else {
+          value = metadata.DefaultValue;
+          source = "Default";
+        }
+      } else {
+        value = metadata.DefaultValue;
+        source = "Default";
+      }
+      if (this.currentValues.has(key)) value = this.currentValues.get(key);
+      const base = value;
+      if (
+        metadata.CoerceValueCallback &&
+        (source !== "Default" || this.currentValues.has(key))
+      ) {
+        const coerced = metadata.CoerceValueCallback(this, cloneValue(value));
+        value =
+          coerced === DependencyProperty.UnsetValue
+            ? this.retainedEffective.has(key)
+              ? this.retainedEffective.get(key)
+              : metadata.DefaultValue
+            : coerced;
+        if (
+          value !== undefined &&
+          definition &&
+          !definition.IsValidValue(value)
+        )
+          throw new RangeError(`Invalid coerced value for ${definition.Name}.`);
+      }
+      const result = {
+        value: cloneValue(value),
+        source,
+        coerced: !equalValue(base, value),
+      };
+      this.effectiveValues.set(key, result);
+      return result;
+    } finally {
+      this.evaluating.delete(key);
+    }
+  }
+  GetValue<T = any>(property: string | DependencyProperty<T>): T {
+    return cloneValue(this.evaluate(property).value);
+  }
+  private validate(property: string | DependencyProperty, value: any): void {
+    const { name, definition } = this.resolve(property);
+    if (definition && !definition.IsValidValue(value))
       throw new RangeError(`Invalid value for ${name}.`);
     if (
       (positive.has(name) &&
@@ -408,57 +920,368 @@ export class DependencyObject {
       )
     )
       throw new RangeError("HeadingLevel must be between 0 and 6.");
-    const next = cloneValue(value);
+    cloneValue(value);
+  }
+  private writable(
+    property: string | DependencyProperty | DependencyPropertyKey,
+  ): string | DependencyProperty {
+    const { definition: resolvedDefinition } = this.resolve(property);
+    const definition =
+      resolvedDefinition ??
+      (typeof property === "string"
+        ? DependencyProperty.Find(property)
+        : undefined);
     if (
-      Object.prototype.hasOwnProperty.call(this.values, name) &&
-      equalValue(this.values[name], next)
+      definition?.ReadOnly &&
+      (!(property instanceof DependencyPropertyKey) ||
+        readOnlyKeys.get(definition) !== property)
     )
-      return;
-    const oldValue = this.GetValue(property);
-    Object.defineProperty(this.values, name, {
-      configurable: true,
-      enumerable: true,
-      writable: true,
-      value: next,
-    });
-    const event = {
+      throw new Error(
+        `${definition.Name} is read-only and requires its property key.`,
+      );
+    return property instanceof DependencyPropertyKey
+      ? property.DependencyProperty
+      : property;
+  }
+  private affected(
+    property: string | DependencyProperty,
+  ): Map<DependencyObject, any> {
+    const result = new Map<DependencyObject, any>();
+    const visit = (owner: DependencyObject): void => {
+      result.set(owner, owner.GetValue(property));
+      for (const child of owner.InheritanceChildren) {
+        const { key, metadata } = child.resolve(property);
+        if (
+          metadata.Inherits &&
+          !Object.prototype.hasOwnProperty.call(child.values, key) &&
+          !child.styleValues.has(key) &&
+          !child.triggerValues.has(key)
+        )
+          visit(child);
+      }
+    };
+    visit(this);
+    return result;
+  }
+  private notify(
+    property: string | DependencyProperty,
+    oldValue: any,
+    inheritedChange = false,
+    baseChanged = false,
+  ): void {
+    const { name, definition, metadata } = this.resolve(property);
+    const event: PropertyChangedEvent = {
       Property: name,
+      DependencyProperty: definition,
       OldValue: oldValue,
       NewValue: this.GetValue(property),
+      IsInherited: inheritedChange,
     };
-    this.OnPropertyChanged(event);
-    definition?.DefaultMetadata.PropertyChangedCallback?.(this, event);
-    this.PropertyChanged.Emit(event);
+    const changed = !equalValue(event.OldValue, event.NewValue);
+    const errors: unknown[] = [];
+    const invoke = (action: () => void): void => {
+      try {
+        action();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+    if (changed) {
+      invoke(() => this.OnPropertyChanged(event));
+      invoke(() => metadata.PropertyChangedCallback?.(this, event));
+      invoke(() => this.PropertyChanged.Emit(event));
+    } else if (baseChanged) invoke(() => this.OnBaseValueChanged(event));
+    if (errors.length) throw errors[0];
+  }
+  private mutate(
+    property: string | DependencyProperty,
+    mutation: () => void,
+    baseChanged: boolean,
+    preserveCurrent = false,
+  ): void {
+    const before = this.affected(property),
+      { key } = this.resolve(property);
+    const previousLocal = this.values[key],
+      hadLocal = Object.prototype.hasOwnProperty.call(this.values, key);
+    const allPreviousCurrent = new Map(
+      [...before.keys()].map((owner) => [owner, new Map(owner.currentValues)]),
+    );
+    const allPreviousEffective = new Map(
+      [...before.keys()].map((owner) => [
+        owner,
+        owner.effectiveValues.get(key),
+      ]),
+    );
+    const previousCurrent = new Map(this.currentValues),
+      previousStyles = new Map(this.styleValues),
+      previousTriggers = new Map(this.triggerValues);
+    mutation();
+    for (const owner of before.keys()) {
+      owner.retainedEffective.set(key, before.get(owner));
+      owner.effectiveValues.delete(key);
+      if (owner !== this || !preserveCurrent) owner.currentValues.delete(key);
+    }
+    try {
+      for (const owner of before.keys()) owner.GetValue(property);
+    } catch (error) {
+      if (hadLocal)
+        Object.defineProperty(this.values, key, {
+          value: previousLocal,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      else delete this.values[key];
+      this.currentValues = previousCurrent;
+      this.styleValues = previousStyles;
+      this.triggerValues = previousTriggers;
+      for (const owner of before.keys()) {
+        owner.effectiveValues.delete(key);
+        const previous = allPreviousEffective.get(owner);
+        if (previous) owner.effectiveValues.set(key, previous);
+        owner.currentValues = allPreviousCurrent.get(owner)!;
+        owner.retainedEffective.delete(key);
+      }
+      throw error;
+    }
+    for (const owner of before.keys()) owner.retainedEffective.delete(key);
+    const errors: unknown[] = [];
+    for (const [owner, oldValue] of before)
+      try {
+        owner.notify(
+          property,
+          oldValue,
+          owner !== this,
+          baseChanged && owner === this,
+        );
+      } catch (error) {
+        errors.push(error);
+      }
+    if (errors.length) throw errors[0];
+  }
+  SetValue<T = any>(
+    property: string | DependencyProperty<T> | DependencyPropertyKey<T>,
+    value: T,
+  ): void {
+    const resolved = this.writable(property);
+    if (value === undefined || value === DependencyProperty.UnsetValue) {
+      this.ClearValue(property);
+      return;
+    }
+    this.validate(resolved, value);
+    const { key } = this.resolve(resolved),
+      next = cloneValue(value);
+    if (
+      Object.prototype.hasOwnProperty.call(this.values, key) &&
+      equalValue(this.values[key], next) &&
+      !this.currentValues.has(key)
+    )
+      return;
+    this.mutate(
+      resolved,
+      () =>
+        Object.defineProperty(this.values, key, {
+          value: next,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        }),
+      true,
+    );
   }
   SetCurrentValue<T = any>(
     property: string | DependencyProperty<T>,
     value: T,
   ): void {
-    this.SetValue(property, value);
+    const resolved = this.writable(property);
+    if (value === undefined || value === DependencyProperty.UnsetValue)
+      throw new TypeError("SetCurrentValue requires a value.");
+    this.validate(resolved, value);
+    const { key } = this.resolve(resolved);
+    for (
+      let owner: DependencyObject | null = this;
+      owner;
+      owner = owner.InheritanceParent
+    )
+      owner.hasCurrentValuesInSubtree = true;
+    this.mutate(
+      resolved,
+      () => this.currentValues.set(key, cloneValue(value)),
+      false,
+      true,
+    );
   }
   ReadLocalValue(property: string | DependencyProperty): any {
-    const name = typeof property === "string" ? property : property.Name;
-    return Object.prototype.hasOwnProperty.call(this.values, name)
-      ? cloneValue(this.values[name])
+    const { key } = this.resolve(property);
+    return Object.prototype.hasOwnProperty.call(this.values, key)
+      ? cloneValue(this.values[key])
       : DependencyProperty.UnsetValue;
   }
-  ClearValue(property: string | DependencyProperty): void {
-    const name = typeof property === "string" ? property : property.Name;
-    if (!Object.prototype.hasOwnProperty.call(this.values, name)) return;
-    const oldValue = this.GetValue(property);
-    delete this.values[name];
-    const event = {
-      Property: name,
-      OldValue: oldValue,
-      NewValue: this.GetValue(property),
+  ClearValue(
+    property: string | DependencyProperty | DependencyPropertyKey,
+  ): void {
+    const resolved = this.writable(property),
+      { key } = this.resolve(resolved);
+    if (
+      !Object.prototype.hasOwnProperty.call(this.values, key) &&
+      !this.currentValues.has(key)
+    )
+      return;
+    this.mutate(
+      resolved,
+      () => {
+        delete this.values[key];
+        this.currentValues.delete(key);
+      },
+      true,
+    );
+  }
+  /** Apply a style setter or active trigger from a host style system. Local values take precedence. */
+  SetStyleValue<T = any>(
+    property: string | DependencyProperty<T>,
+    value: T,
+    isTrigger = false,
+  ): void {
+    const resolved = this.writable(property),
+      { key } = this.resolve(resolved);
+    if (value === undefined || value === DependencyProperty.UnsetValue) {
+      this.ClearStyleValue(property, isTrigger);
+      return;
+    }
+    this.validate(resolved, value);
+    this.mutate(
+      resolved,
+      () =>
+        (isTrigger ? this.triggerValues : this.styleValues).set(
+          key,
+          cloneValue(value),
+        ),
+      false,
+    );
+  }
+  ClearStyleValue(
+    property: string | DependencyProperty,
+    isTrigger = false,
+  ): void {
+    const resolved = this.writable(property),
+      { key } = this.resolve(resolved),
+      values = isTrigger ? this.triggerValues : this.styleValues;
+    if (values.has(key)) this.mutate(resolved, () => values.delete(key), false);
+  }
+  CoerceValue(property: string | DependencyProperty): void {
+    this.mutate(property, () => {}, false, true);
+  }
+  InvalidateProperty(property: string | DependencyProperty): void {
+    this.mutate(property, () => {}, false);
+  }
+  GetAnimationBaseValue<T = any>(property: string | DependencyProperty<T>): T {
+    return this.GetValue(property);
+  }
+  GetValueSource(property: string | DependencyProperty): ValueSource {
+    const { key } = this.resolve(property),
+      effective = this.evaluate(property);
+    return {
+      BaseValueSource: effective.source,
+      IsCoerced: effective.coerced,
+      IsCurrent: this.currentValues.has(key),
+      IsExpression: false,
+      IsAnimated: false,
     };
-    this.OnPropertyChanged(event);
-    const definition =
-      typeof property === "string" ? DependencyProperty.Find(name) : property;
-    definition?.DefaultMetadata.PropertyChangedCallback?.(this, event);
-    this.PropertyChanged.Emit(event);
+  }
+  GetLocalValueEnumerator(): LocalValueEnumerator {
+    return new LocalValueEnumerator(
+      Object.entries(this.values).map(([key, value]) => ({
+        Property: DependencyProperty.Find(key, this.constructor) ?? key,
+        Value: cloneValue(value),
+      })),
+    );
+  }
+  /** @internal Reset computed/transient values after a complete document replacement. */
+  protected ResetPropertyState(): void {
+    this.effectiveValues.clear();
+    this.currentValues.clear();
+    this.styleValues.clear();
+    this.triggerValues.clear();
+  }
+  /** Parent changes invalidate inherited defaults, current values, and derived metadata across the subtree. */
+  protected ChangeInheritanceParent(
+    change: () => void,
+    nextParent: DependencyObject | null,
+  ): () => void {
+    const unique = new Map<string, string | DependencyProperty>();
+    const add = (name: string): void => {
+      const property = DependencyProperty.Find(name, this.constructor) ?? name;
+      unique.set(this.resolve(property).key, property);
+    };
+    // Metadata defaults do not inherit. Only actual old/new ancestor value sources can
+    // change effective values when a newly constructed, untouched node is attached.
+    for (const parent of [this.InheritanceParent, nextParent]) {
+      for (let owner = parent; owner; owner = owner.InheritanceParent) {
+        for (const key of [
+          ...Object.keys(owner.values),
+          ...owner.styleValues.keys(),
+          ...owner.triggerValues.keys(),
+          ...owner.currentValues.keys(),
+        ])
+          if (
+            this.resolve(DependencyProperty.Find(key, owner.constructor) ?? key)
+              .metadata.Inherits
+          )
+            add(key);
+      }
+    }
+    for (const [key, effective] of this.effectiveValues)
+      if (effective.source === "Inherited") add(key);
+    if (this.hasCurrentValuesInSubtree) {
+      const visit = (owner: DependencyObject): void => {
+        for (const key of owner.currentValues.keys())
+          if (owner.resolve(key).metadata.Inherits) add(key);
+        for (const child of owner.InheritanceChildren)
+          if (child.hasCurrentValuesInSubtree) visit(child);
+      };
+      visit(this);
+    }
+    if (!unique.size) {
+      change();
+      if (this.hasCurrentValuesInSubtree)
+        for (let owner = nextParent; owner; owner = owner.InheritanceParent)
+          owner.hasCurrentValuesInSubtree = true;
+      return () => {};
+    }
+    const snapshots = [...unique.values()].map(
+      (property) => [property, this.affected(property)] as const,
+    );
+    change();
+    if (this.hasCurrentValuesInSubtree)
+      for (let owner = nextParent; owner; owner = owner.InheritanceParent)
+        owner.hasCurrentValuesInSubtree = true;
+    for (const [property, before] of snapshots) {
+      const { key } = this.resolve(property);
+      for (const owner of before.keys()) {
+        owner.effectiveValues.delete(key);
+        owner.currentValues.delete(key);
+      }
+    }
+    return () => {
+      const errors: unknown[] = [];
+      for (const [property, before] of snapshots) {
+        const { key } = this.resolve(property);
+        for (const owner of before.keys()) {
+          owner.effectiveValues.delete(key);
+          owner.currentValues.delete(key);
+        }
+        for (const [owner, value] of before)
+          try {
+            owner.notify(property, value, true);
+          } catch (error) {
+            errors.push(error);
+          }
+      }
+      if (errors.length) throw errors[0];
+    };
   }
   protected OnPropertyChanged(_event: PropertyChangedEvent): void {}
+  protected OnBaseValueChanged(_event: PropertyChangedEvent): void {}
 }
 
 let idSequence = 0;
@@ -523,9 +1346,11 @@ export class TextElement extends DependencyObject {
   /** @internal */ _setParent(
     parent: TextElement | null,
     collection: TextElementCollection<any> | null,
-  ): void {
-    this.parent = parent;
-    this._collection = collection;
+  ): () => void {
+    return this.ChangeInheritanceParent(() => {
+      this.parent = parent;
+      this._collection = collection;
+    }, parent);
   }
   /** @internal */ _setId(id: string): void {
     if (typeof id !== "string" || !id)
@@ -539,7 +1364,16 @@ export class TextElement extends DependencyObject {
   /** @internal */ _notify(change: DocumentChange): void {
     this.Document?._record(change);
   }
+  protected override get InheritanceChildren(): readonly DependencyObject[] {
+    return this instanceof Table
+      ? [...this.Columns, ...this.Children]
+      : this.Children;
+  }
   protected override OnPropertyChanged(event: PropertyChangedEvent): void {
+    if (!event.IsInherited)
+      this._notify({ Element: this, Kind: "property", ...event });
+  }
+  protected override OnBaseValueChanged(event: PropertyChangedEvent): void {
     this._notify({ Element: this, Kind: "property", ...event });
   }
   get Text(): string {
@@ -628,6 +1462,12 @@ export class TextElement extends DependencyObject {
   set FontStyle(value: string) {
     this.SetValue("FontStyle", value);
   }
+  get FontStretch(): string {
+    return this.GetValue("FontStretch");
+  }
+  set FontStretch(value: string) {
+    this.SetValue("FontStretch", value);
+  }
   get Foreground(): string {
     return this.GetValue("Foreground");
   }
@@ -672,7 +1512,7 @@ export class TextElement extends DependencyObject {
   );
   static readonly FontWeightProperty = DependencyProperty.Register(
     "FontWeight",
-    String,
+    [String, Number],
     TextElement,
     { DefaultValue: "Normal", Inherits: true },
   );
@@ -694,6 +1534,76 @@ export class TextElement extends DependencyObject {
     TextElement,
     { DefaultValue: "transparent" },
   );
+  static readonly FontStretchProperty = DependencyProperty.Register(
+    "FontStretch",
+    String,
+    TextElement,
+    { DefaultValue: "Normal", Inherits: true },
+  );
+  static readonly FlowDirectionProperty = DependencyProperty.Register(
+    "FlowDirection",
+    String,
+    TextElement,
+    { DefaultValue: "LeftToRight", Inherits: true },
+    (value) => Object.values(FlowDirection).includes(value as any),
+  );
+  static readonly LanguageProperty = DependencyProperty.Register(
+    "Language",
+    String,
+    TextElement,
+    { DefaultValue: "en", Inherits: true },
+  );
+  static readonly TextDecorationsProperty = DependencyProperty.Register<
+    string | string[]
+  >("TextDecorations", Object, TextElement, { DefaultValue: "None" });
+  static readonly NameProperty = DependencyProperty.Register(
+    "Name",
+    String,
+    TextElement,
+    { DefaultValue: "" },
+  );
+  static readonly TagProperty = DependencyProperty.Register<any>(
+    "Tag",
+    Object,
+    TextElement,
+    { DefaultValue: undefined },
+  );
+  static GetFontFamily(owner: DependencyObject): string {
+    return owner.GetValue(TextElement.FontFamilyProperty);
+  }
+  static SetFontFamily(owner: DependencyObject, value: string): void {
+    owner.SetValue(TextElement.FontFamilyProperty, value);
+  }
+  static GetFontSize(owner: DependencyObject): number {
+    return owner.GetValue(TextElement.FontSizeProperty);
+  }
+  static SetFontSize(owner: DependencyObject, value: number): void {
+    owner.SetValue(TextElement.FontSizeProperty, value);
+  }
+  static GetFontWeight(owner: DependencyObject): string | number {
+    return owner.GetValue(TextElement.FontWeightProperty);
+  }
+  static SetFontWeight(owner: DependencyObject, value: string | number): void {
+    owner.SetValue<any>(TextElement.FontWeightProperty, value);
+  }
+  static GetFontStyle(owner: DependencyObject): string {
+    return owner.GetValue(TextElement.FontStyleProperty);
+  }
+  static SetFontStyle(owner: DependencyObject, value: string): void {
+    owner.SetValue(TextElement.FontStyleProperty, value);
+  }
+  static GetFontStretch(owner: DependencyObject): string {
+    return owner.GetValue(TextElement.FontStretchProperty);
+  }
+  static SetFontStretch(owner: DependencyObject, value: string): void {
+    owner.SetValue(TextElement.FontStretchProperty, value);
+  }
+  static GetForeground(owner: DependencyObject): string {
+    return owner.GetValue(TextElement.ForegroundProperty);
+  }
+  static SetForeground(owner: DependencyObject, value: string): void {
+    owner.SetValue(TextElement.ForegroundProperty, value);
+  }
 }
 
 export class TextElementCollection<
@@ -795,24 +1705,39 @@ export class TextElementCollection<
       doc?.EndChange();
     }
   }
+  private dispatch(actions: readonly (() => void)[]): void {
+    const errors: unknown[] = [];
+    for (const action of actions)
+      try {
+        action();
+      } catch (error) {
+        errors.push(error);
+      }
+    if (errors.length) throw errors[0];
+  }
   Insert(index: number, item: T): void {
     this.checkIndex(index, true);
     this.validate(item);
+    const notifyInheritance = item._setParent(this.Owner, this);
     this.items.splice(index, 0, item);
-    item._setParent(this.Owner, this);
     this.Owner.Document?._registerSubtree(item);
-    this.Owner._notify({
-      Element: this.Owner,
-      Kind: "insert",
-      NewValue: item,
-      Index: index,
-    });
-    this.CollectionChanged.Emit({
-      Action: "Add",
-      NewItems: [item],
-      OldItems: [],
-      Index: index,
-    });
+    this.dispatch([
+      () =>
+        this.Owner._notify({
+          Element: this.Owner,
+          Kind: "insert",
+          NewValue: item,
+          Index: index,
+        }),
+      notifyInheritance,
+      () =>
+        this.CollectionChanged.Emit({
+          Action: "Add",
+          NewItems: [item],
+          OldItems: [],
+          Index: index,
+        }),
+    ]);
   }
   InsertBefore(sibling: T, item: T): void {
     const index = this.IndexOf(sibling);
@@ -829,24 +1754,30 @@ export class TextElementCollection<
     const previous = this.items[index]!;
     if (previous === item) return;
     this.validate(item, new Set(walkElements(previous).map((node) => node.Id)));
+    const detached = previous._setParent(null, null),
+      attached = item._setParent(this.Owner, this);
     this.Owner.Document?._unregisterSubtree(previous);
     this.items[index] = item;
-    previous._setParent(null, null);
-    item._setParent(this.Owner, this);
     this.Owner.Document?._registerSubtree(item);
-    this.Owner._notify({
-      Element: this.Owner,
-      Kind: "reset",
-      OldValue: previous,
-      NewValue: item,
-      Index: index,
-    });
-    this.CollectionChanged.Emit({
-      Action: "Replace",
-      NewItems: [item],
-      OldItems: [previous],
-      Index: index,
-    });
+    this.dispatch([
+      () =>
+        this.Owner._notify({
+          Element: this.Owner,
+          Kind: "reset",
+          OldValue: previous,
+          NewValue: item,
+          Index: index,
+        }),
+      detached,
+      attached,
+      () =>
+        this.CollectionChanged.Emit({
+          Action: "Replace",
+          NewItems: [item],
+          OldItems: [previous],
+          Index: index,
+        }),
+    ]);
   }
   Remove(item: T): boolean {
     const index = this.items.indexOf(item);
@@ -856,42 +1787,51 @@ export class TextElementCollection<
   }
   RemoveAt(index: number): void {
     this.checkIndex(index);
-    const [item] = this.items.splice(index, 1);
-    this.Owner.Document?._unregisterSubtree(item!);
-    item!._setParent(null, null);
-    this.Owner._notify({
-      Element: this.Owner,
-      Kind: "remove",
-      OldValue: item,
-      Index: index,
-    });
-    this.CollectionChanged.Emit({
-      Action: "Remove",
-      NewItems: [],
-      OldItems: [item!],
-      Index: index,
-    });
+    const item = this.items[index]!;
+    const notifyInheritance = item._setParent(null, null);
+    this.items.splice(index, 1);
+    this.Owner.Document?._unregisterSubtree(item);
+    this.dispatch([
+      () =>
+        this.Owner._notify({
+          Element: this.Owner,
+          Kind: "remove",
+          OldValue: item,
+          Index: index,
+        }),
+      notifyInheritance,
+      () =>
+        this.CollectionChanged.Emit({
+          Action: "Remove",
+          NewItems: [],
+          OldItems: [item],
+          Index: index,
+        }),
+    ]);
   }
   Clear(): void {
     if (!this.items.length) return;
     const oldItems = this.items;
+    const notifications = oldItems.map((item) => item._setParent(null, null));
     this.items = [];
-    for (const item of oldItems) {
-      this.Owner.Document?._unregisterSubtree(item);
-      item._setParent(null, null);
-    }
-    this.Owner._notify({
-      Element: this.Owner,
-      Kind: "reset",
-      OldValue: oldItems,
-      NewValue: [],
-    });
-    this.CollectionChanged.Emit({
-      Action: "Reset",
-      NewItems: [],
-      OldItems: oldItems,
-      Index: 0,
-    });
+    for (const item of oldItems) this.Owner.Document?._unregisterSubtree(item);
+    this.dispatch([
+      () =>
+        this.Owner._notify({
+          Element: this.Owner,
+          Kind: "reset",
+          OldValue: oldItems,
+          NewValue: [],
+        }),
+      ...notifications,
+      () =>
+        this.CollectionChanged.Emit({
+          Action: "Reset",
+          NewItems: [],
+          OldItems: oldItems,
+          Index: 0,
+        }),
+    ]);
   }
   Contains(item: T): boolean {
     return this.items.includes(item);
@@ -933,6 +1873,13 @@ export class Inline extends TextElement {
     const index = this._collection.IndexOf(this);
     return index > 0 ? (this._collection.at(index - 1) ?? null) : null;
   }
+  static readonly BaselineAlignmentProperty = DependencyProperty.Register(
+    "BaselineAlignment",
+    String,
+    Inline,
+    { DefaultValue: "Baseline" },
+    (value) => Object.values(BaselineAlignment).includes(value as any),
+  );
 }
 export class Block extends TextElement {
   constructor(type = "Block") {
@@ -1001,23 +1948,66 @@ export class Block extends TextElement {
     Block,
     { DefaultValue: "Left", Inherits: true },
   );
-  static readonly MarginProperty = DependencyProperty.Register(
-    "Margin",
-    Thickness,
-    Block,
-    { DefaultValue: 0 },
-  );
-  static readonly PaddingProperty = DependencyProperty.Register(
-    "Padding",
-    Thickness,
-    Block,
-    { DefaultValue: 0 },
-  );
+  static readonly MarginProperty = DependencyProperty.Register<
+    number | Thickness | Record<string, number>
+  >("Margin", Thickness, Block, { DefaultValue: 0 });
+  static readonly PaddingProperty = DependencyProperty.Register<
+    number | Thickness | Record<string, number>
+  >("Padding", Thickness, Block, { DefaultValue: 0 });
   static readonly LineHeightProperty = DependencyProperty.Register(
     "LineHeight",
     Number,
     Block,
     { DefaultValue: 1.5, Inherits: true },
+  );
+  get BorderThickness(): number | Thickness | Record<string, number> {
+    return this.GetValue("BorderThickness") ?? 0;
+  }
+  set BorderThickness(value: number | Thickness | Record<string, number>) {
+    this.SetValue("BorderThickness", value);
+  }
+  get BorderBrush(): string {
+    return this.GetValue("BorderBrush") ?? "#d1d5db";
+  }
+  set BorderBrush(value: string) {
+    this.SetValue("BorderBrush", value);
+  }
+  get LineStackingStrategy(): string {
+    return this.GetValue("LineStackingStrategy") ?? "MaxHeight";
+  }
+  set LineStackingStrategy(value: string) {
+    this.SetValue("LineStackingStrategy", value);
+  }
+  static readonly BreakPageBeforeProperty = DependencyProperty.Register(
+    "BreakPageBefore",
+    Boolean,
+    Block,
+    { DefaultValue: false },
+  );
+  static readonly BreakColumnBeforeProperty = DependencyProperty.Register(
+    "BreakColumnBefore",
+    Boolean,
+    Block,
+    { DefaultValue: false },
+  );
+  static readonly KeepTogetherProperty = DependencyProperty.Register(
+    "KeepTogether",
+    Boolean,
+    Block,
+    { DefaultValue: false },
+  );
+  static readonly KeepWithNextProperty = DependencyProperty.Register(
+    "KeepWithNext",
+    Boolean,
+    Block,
+    { DefaultValue: false },
+  );
+  static readonly LineStackingStrategyProperty = DependencyProperty.Register(
+    "LineStackingStrategy",
+    String,
+    Block,
+    { DefaultValue: "MaxHeight", Inherits: true },
+    (value) => Object.values(LineStackingStrategy).includes(value as any),
   );
 }
 export class Run extends Inline {
@@ -1234,7 +2224,385 @@ export class Paragraph extends Block {
   set TextIndent(value: number) {
     this.SetValue("TextIndent", value);
   }
+  static readonly TextIndentProperty = DependencyProperty.Register(
+    "TextIndent",
+    Number,
+    Paragraph,
+    { DefaultValue: 0 },
+    Number.isFinite,
+  );
+  static readonly HeadingLevelProperty = DependencyProperty.Register(
+    "HeadingLevel",
+    Number,
+    Paragraph,
+    { DefaultValue: 0 },
+  );
 }
+export const FigureUnitType = {
+  Auto: "Auto",
+  Pixel: "Pixel",
+  Column: "Column",
+  Content: "Content",
+  Page: "Page",
+} as const;
+export type FigureUnitTypeValue =
+  (typeof FigureUnitType)[keyof typeof FigureUnitType];
+export class FigureLength {
+  readonly Value: number;
+  readonly FigureUnitType: FigureUnitTypeValue;
+  constructor(value = 1, unit: FigureUnitTypeValue = "Pixel") {
+    if (
+      !Object.values(FigureUnitType).includes(unit) ||
+      !Number.isFinite(value) ||
+      value < 0 ||
+      ((unit === "Page" || unit === "Content") && value > 1)
+    )
+      throw new RangeError("Invalid FigureLength value or unit.");
+    this.Value = unit === "Auto" ? 1 : value;
+    this.FigureUnitType = unit;
+  }
+  static get Auto(): FigureLength {
+    return new FigureLength(1, "Auto");
+  }
+  get IsAbsolute(): boolean {
+    return this.FigureUnitType === "Pixel";
+  }
+  get IsAuto(): boolean {
+    return this.FigureUnitType === "Auto";
+  }
+  get IsColumn(): boolean {
+    return this.FigureUnitType === "Column";
+  }
+  get IsContent(): boolean {
+    return this.FigureUnitType === "Content";
+  }
+  get IsPage(): boolean {
+    return this.FigureUnitType === "Page";
+  }
+  Equals(other: unknown): boolean {
+    return (
+      other instanceof FigureLength &&
+      other.Value === this.Value &&
+      other.FigureUnitType === this.FigureUnitType
+    );
+  }
+  ToString(): string {
+    return this.IsAuto
+      ? "Auto"
+      : `${this.Value}${this.IsAbsolute ? "" : ` ${this.FigureUnitType}`}`;
+  }
+  toString(): string {
+    return this.ToString();
+  }
+  toJSON(): { Value: number; FigureUnitType: FigureUnitTypeValue } {
+    return { Value: this.Value, FigureUnitType: this.FigureUnitType };
+  }
+  static Parse(text: string): FigureLength {
+    if (text.trim().toLowerCase() === "auto") return FigureLength.Auto;
+    const match =
+      /^\s*(\d+(?:\.\d+)?|\.\d+)\s*(pixel|px|column|content|page)?\s*$/i.exec(
+        text,
+      );
+    if (!match) throw new TypeError("Invalid FigureLength text.");
+    const units: Record<string, FigureUnitTypeValue> = {
+      pixel: "Pixel",
+      px: "Pixel",
+      column: "Column",
+      content: "Content",
+      page: "Page",
+    };
+    return new FigureLength(
+      Number(match[1]),
+      units[match[2]?.toLowerCase() ?? "px"]!,
+    );
+  }
+}
+export const FigureHorizontalAnchor = {
+  PageLeft: "PageLeft",
+  PageCenter: "PageCenter",
+  PageRight: "PageRight",
+  ContentLeft: "ContentLeft",
+  ContentCenter: "ContentCenter",
+  ContentRight: "ContentRight",
+  ColumnLeft: "ColumnLeft",
+  ColumnCenter: "ColumnCenter",
+  ColumnRight: "ColumnRight",
+} as const;
+export const FigureVerticalAnchor = {
+  PageTop: "PageTop",
+  PageCenter: "PageCenter",
+  PageBottom: "PageBottom",
+  ContentTop: "ContentTop",
+  ContentCenter: "ContentCenter",
+  ContentBottom: "ContentBottom",
+  ParagraphTop: "ParagraphTop",
+} as const;
+export const WrapDirection = {
+  None: "None",
+  Left: "Left",
+  Right: "Right",
+  Both: "Both",
+} as const;
+export const HorizontalAlignment = {
+  Left: "Left",
+  Center: "Center",
+  Right: "Right",
+  Stretch: "Stretch",
+} as const;
+/** Floating content is an atomic main-story object; Blocks form an independently editable story. */
+export abstract class AnchoredBlock extends Inline {
+  readonly Blocks: TextElementCollection<Block>;
+  constructor(content?: Block | readonly Block[], type = "AnchoredBlock") {
+    super(type);
+    this.Blocks = new TextElementCollection(
+      this,
+      (item) => item instanceof Block,
+    );
+    this.childCollection = this.Blocks;
+    addBlocks(this.Blocks, content);
+  }
+  get StoryText(): string {
+    return this.Blocks.ToArray()
+      .map((block) => block.Text)
+      .join("\n");
+  }
+  CreateStoryDocument(): FlowDocument {
+    const story = new FlowDocument();
+    for (const [name, value] of Object.entries(this.ToJSON().props))
+      if (inherited.has(name)) story.SetValue(name, value);
+    // Inherited formatting is materialized on the story root without changing the source object.
+    for (const name of inherited)
+      if (this.GetValue(name) !== undefined)
+        story.SetValue(name, this.GetValue(name));
+    story.Blocks.AddRange(this.Blocks.ToArray().map((block) => block.Clone()));
+    return story;
+  }
+  get Margin(): number | Thickness | Record<string, number> {
+    return this.GetValue(AnchoredBlock.MarginProperty);
+  }
+  set Margin(value: number | Thickness | Record<string, number>) {
+    this.SetValue(AnchoredBlock.MarginProperty, value);
+  }
+  get Padding(): number | Thickness | Record<string, number> {
+    return this.GetValue(AnchoredBlock.PaddingProperty);
+  }
+  set Padding(value: number | Thickness | Record<string, number>) {
+    this.SetValue(AnchoredBlock.PaddingProperty, value);
+  }
+  get BorderThickness(): number | Thickness | Record<string, number> {
+    return this.GetValue(AnchoredBlock.BorderThicknessProperty);
+  }
+  set BorderThickness(value: number | Thickness | Record<string, number>) {
+    this.SetValue(AnchoredBlock.BorderThicknessProperty, value);
+  }
+  get BorderBrush(): string {
+    return this.GetValue(AnchoredBlock.BorderBrushProperty);
+  }
+  set BorderBrush(value: string) {
+    this.SetValue(AnchoredBlock.BorderBrushProperty, value);
+  }
+  get TextAlignment(): string {
+    return this.GetValue(AnchoredBlock.TextAlignmentProperty);
+  }
+  set TextAlignment(value: string) {
+    this.SetValue(AnchoredBlock.TextAlignmentProperty, value);
+  }
+  get LineHeight(): number {
+    return this.GetValue(AnchoredBlock.LineHeightProperty);
+  }
+  set LineHeight(value: number) {
+    this.SetValue(AnchoredBlock.LineHeightProperty, value);
+  }
+  static readonly MarginProperty = Block.MarginProperty.AddOwner(AnchoredBlock);
+  static readonly PaddingProperty =
+    Block.PaddingProperty.AddOwner(AnchoredBlock);
+  static readonly TextAlignmentProperty =
+    Block.TextAlignmentProperty.AddOwner(AnchoredBlock);
+  static readonly LineHeightProperty =
+    Block.LineHeightProperty.AddOwner(AnchoredBlock);
+  static readonly BorderThicknessProperty = DependencyProperty.Register<
+    number | Thickness | Record<string, number>
+  >("BorderThickness", Thickness, AnchoredBlock, { DefaultValue: 0 });
+  static readonly BorderBrushProperty = DependencyProperty.Register(
+    "BorderBrush",
+    String,
+    AnchoredBlock,
+    { DefaultValue: "#d1d5db" },
+  );
+}
+function validFigureLength(value: any): boolean {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0;
+  if (!value || typeof value !== "object") return false;
+  try {
+    new FigureLength(value.Value, value.FigureUnitType);
+    return true;
+  } catch {
+    return false;
+  }
+}
+export class Figure extends AnchoredBlock {
+  constructor(content?: Block | readonly Block[]) {
+    super(content, "Figure");
+  }
+  get Width():
+    | number
+    | FigureLength
+    | { Value: number; FigureUnitType: FigureUnitTypeValue } {
+    return this.GetValue(Figure.WidthProperty);
+  }
+  set Width(
+    value:
+      | number
+      | FigureLength
+      | { Value: number; FigureUnitType: FigureUnitTypeValue },
+  ) {
+    this.SetValue(Figure.WidthProperty, value);
+  }
+  get Height():
+    | number
+    | FigureLength
+    | { Value: number; FigureUnitType: FigureUnitTypeValue } {
+    return this.GetValue(Figure.HeightProperty);
+  }
+  set Height(
+    value:
+      | number
+      | FigureLength
+      | { Value: number; FigureUnitType: FigureUnitTypeValue },
+  ) {
+    this.SetValue(Figure.HeightProperty, value);
+  }
+  get HorizontalAnchor(): string {
+    return this.GetValue(Figure.HorizontalAnchorProperty);
+  }
+  set HorizontalAnchor(value: string) {
+    this.SetValue(Figure.HorizontalAnchorProperty, value);
+  }
+  get VerticalAnchor(): string {
+    return this.GetValue(Figure.VerticalAnchorProperty);
+  }
+  set VerticalAnchor(value: string) {
+    this.SetValue(Figure.VerticalAnchorProperty, value);
+  }
+  get HorizontalOffset(): number {
+    return this.GetValue(Figure.HorizontalOffsetProperty);
+  }
+  set HorizontalOffset(value: number) {
+    this.SetValue(Figure.HorizontalOffsetProperty, value);
+  }
+  get VerticalOffset(): number {
+    return this.GetValue(Figure.VerticalOffsetProperty);
+  }
+  set VerticalOffset(value: number) {
+    this.SetValue(Figure.VerticalOffsetProperty, value);
+  }
+  get WrapDirection(): string {
+    return this.GetValue(Figure.WrapDirectionProperty);
+  }
+  set WrapDirection(value: string) {
+    this.SetValue(Figure.WrapDirectionProperty, value);
+  }
+  get CanDelayPlacement(): boolean {
+    return this.GetValue(Figure.CanDelayPlacementProperty);
+  }
+  set CanDelayPlacement(value: boolean) {
+    this.SetValue(Figure.CanDelayPlacementProperty, value);
+  }
+  static readonly WidthProperty = DependencyProperty.Register<any>(
+    "Width",
+    Object,
+    Figure,
+    { DefaultValue: FigureLength.Auto },
+    validFigureLength,
+  );
+  static readonly HeightProperty = DependencyProperty.Register<any>(
+    "Height",
+    Object,
+    Figure,
+    { DefaultValue: FigureLength.Auto },
+    validFigureLength,
+  );
+  static readonly HorizontalAnchorProperty = DependencyProperty.Register(
+    "HorizontalAnchor",
+    String,
+    Figure,
+    { DefaultValue: "ColumnRight" },
+    (value) => Object.values(FigureHorizontalAnchor).includes(value as any),
+  );
+  static readonly VerticalAnchorProperty = DependencyProperty.Register(
+    "VerticalAnchor",
+    String,
+    Figure,
+    { DefaultValue: "ParagraphTop" },
+    (value) => Object.values(FigureVerticalAnchor).includes(value as any),
+  );
+  static readonly HorizontalOffsetProperty = DependencyProperty.Register(
+    "HorizontalOffset",
+    Number,
+    Figure,
+    { DefaultValue: 0 },
+    Number.isFinite,
+  );
+  static readonly VerticalOffsetProperty = DependencyProperty.Register(
+    "VerticalOffset",
+    Number,
+    Figure,
+    { DefaultValue: 0 },
+    Number.isFinite,
+  );
+  static readonly WrapDirectionProperty = DependencyProperty.Register(
+    "WrapDirection",
+    String,
+    Figure,
+    { DefaultValue: "Both" },
+    (value) => Object.values(WrapDirection).includes(value as any),
+  );
+  static readonly CanDelayPlacementProperty = DependencyProperty.Register(
+    "CanDelayPlacement",
+    Boolean,
+    Figure,
+    { DefaultValue: true },
+  );
+}
+export class Floater extends AnchoredBlock {
+  constructor(content?: Block | readonly Block[]) {
+    super(content, "Floater");
+  }
+  get Width(): number | undefined {
+    return this.GetValue(Floater.WidthProperty);
+  }
+  set Width(value: number | undefined) {
+    this.SetValue(Floater.WidthProperty, value);
+  }
+  get HorizontalAlignment(): string {
+    return this.GetValue(Floater.HorizontalAlignmentProperty);
+  }
+  set HorizontalAlignment(value: string) {
+    this.SetValue(Floater.HorizontalAlignmentProperty, value);
+  }
+  // Use the same portable dimension DP identity; Floater validates the stricter numeric width wrapper.
+  static readonly WidthProperty = Figure.WidthProperty.AddOwner(Floater, {
+    DefaultValue: undefined,
+    CoerceValueCallback: (_owner, value) => {
+      if (
+        value !== undefined &&
+        !(typeof value === "number" && Number.isFinite(value) && value >= 0)
+      )
+        throw new RangeError(
+          "Floater Width must be a finite nonnegative number.",
+        );
+      return value;
+    },
+  });
+  static readonly HorizontalAlignmentProperty = DependencyProperty.Register(
+    "HorizontalAlignment",
+    String,
+    Floater,
+    { DefaultValue: "Left" },
+    (value) => Object.values(HorizontalAlignment).includes(value as any),
+  );
+}
+
 export class Section extends Block {
   readonly Blocks: TextElementCollection<Block>;
   constructor(content?: Block | readonly Block[]) {
@@ -1650,6 +3018,7 @@ export class FlowDocument extends TextElement {
     this.BeginChange();
     try {
       this.values = cloneValue(replacement.values);
+      this.ResetPropertyState();
       this.Blocks.Clear();
       const blocks = replacement.Blocks.ToArray();
       replacement.Blocks.Clear();
@@ -1674,6 +3043,84 @@ export class FlowDocument extends TextElement {
   FindById(id: string): TextElement | null {
     return this.elementIds.get(id) ?? null;
   }
+  get ColumnWidth(): number | undefined {
+    return this.GetValue("ColumnWidth");
+  }
+  set ColumnWidth(value: number | undefined) {
+    this.SetValue("ColumnWidth", value);
+  }
+  get IsOptimalParagraphEnabled(): boolean {
+    return this.GetValue("IsOptimalParagraphEnabled");
+  }
+  set IsOptimalParagraphEnabled(value: boolean) {
+    this.SetValue("IsOptimalParagraphEnabled", value);
+  }
+  get IsColumnWidthFlexible(): boolean {
+    return this.GetValue("IsColumnWidthFlexible");
+  }
+  set IsColumnWidthFlexible(value: boolean) {
+    this.SetValue("IsColumnWidthFlexible", value);
+  }
+  static readonly PageWidthProperty = DependencyProperty.Register(
+    "PageWidth",
+    Number,
+    FlowDocument,
+    { DefaultValue: 816 },
+  );
+  static readonly PageHeightProperty = DependencyProperty.Register(
+    "PageHeight",
+    Number,
+    FlowDocument,
+    { DefaultValue: 1056 },
+  );
+  static readonly PagePaddingProperty = DependencyProperty.Register<
+    number | Thickness | Record<string, number>
+  >("PagePadding", Thickness, FlowDocument, { DefaultValue: 72 });
+  static readonly ColumnCountProperty = DependencyProperty.Register(
+    "ColumnCount",
+    Number,
+    FlowDocument,
+    { DefaultValue: 1 },
+  );
+  static readonly ColumnGapProperty = DependencyProperty.Register(
+    "ColumnGap",
+    Number,
+    FlowDocument,
+    { DefaultValue: 24 },
+    (value) => Number.isFinite(value) && value >= 0,
+  );
+  static readonly ColumnWidthProperty = DependencyProperty.Register<
+    number | undefined
+  >(
+    "ColumnWidth",
+    Number,
+    FlowDocument,
+    { DefaultValue: undefined },
+    (value) => value === undefined || (Number.isFinite(value) && value > 0),
+  );
+  static readonly TextAlignmentProperty =
+    Block.TextAlignmentProperty.AddOwner(FlowDocument);
+  static readonly LineHeightProperty =
+    Block.LineHeightProperty.AddOwner(FlowDocument);
+  static readonly IsHyphenationEnabledProperty = DependencyProperty.Register(
+    "IsHyphenationEnabled",
+    Boolean,
+    FlowDocument,
+    { DefaultValue: false, Inherits: true },
+  );
+  static readonly IsOptimalParagraphEnabledProperty =
+    DependencyProperty.Register(
+      "IsOptimalParagraphEnabled",
+      Boolean,
+      FlowDocument,
+      { DefaultValue: false },
+    );
+  static readonly IsColumnWidthFlexibleProperty = DependencyProperty.Register(
+    "IsColumnWidthFlexible",
+    Boolean,
+    FlowDocument,
+    { DefaultValue: true },
+  );
 }
 
 /** Depth-first traversal, including table columns. */
@@ -1703,6 +3150,7 @@ function inlineText(root: TextElement): string {
   if (root instanceof LineBreak) return "\n";
   if (
     root instanceof Image ||
+    root instanceof AnchoredBlock ||
     root instanceof InlineUIContainer ||
     root instanceof BlockUIContainer
   )
@@ -1731,10 +3179,13 @@ function elementOffset(document: FlowDocument, target: TextElement): number {
         return offset + inlineText(node).length;
       if (
         node instanceof Image ||
+        node instanceof AnchoredBlock ||
         node instanceof InlineUIContainer ||
         node instanceof BlockUIContainer
       ) {
-        for (const child of node.Children) if (child === target) found = offset;
+        if (!(node instanceof AnchoredBlock))
+          for (const child of node.Children)
+            if (child === target) found = offset;
         return offset + 1;
       }
       let next = offset;
@@ -1844,7 +3295,7 @@ export class TextSymbolMap {
     };
     const visit = (element: TextElement, depth: number): void => {
       if (element instanceof TableColumn) return;
-      if (element instanceof Image) {
+      if (element instanceof Image || element instanceof AnchoredBlock) {
         const start = symbol;
         add(TextPointerContext.EmbeddedElement, element, 1, 1);
         this.records.set(element.Id, {
@@ -2656,6 +4107,12 @@ export function elementFromJSON(
       case "FlowDocument":
         element = new FlowDocument();
         break;
+      case "Figure":
+        element = new Figure();
+        break;
+      case "Floater":
+        element = new Floater();
+        break;
       case "Section":
         element = new Section();
         break;
@@ -2733,6 +4190,7 @@ export function elementFromJSON(
       const parsed = parse(child, depth + 1);
       const target =
         element instanceof FlowDocument ||
+        element instanceof AnchoredBlock ||
         element instanceof Section ||
         element instanceof ListItem ||
         element instanceof TableCell

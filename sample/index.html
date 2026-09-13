@@ -10,6 +10,7 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231254a3'/%3E%3Cpath d='M8 8h16M16 8v17M11 25h10' stroke='white' stroke-width='3' fill='none'/%3E%3C/svg%3E"
     />
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="app.css" />
   </head>
   <body>
     <div class="studio">
@@ -34,25 +35,11 @@
           </button>
         </div>
       </header>
-      <nav class="tabs" aria-label="Editor tools">
-        <button data-tab="file">File</button
-        ><button data-tab="home" class="active" aria-selected="true">
-          Home</button
-        ><button data-tab="insert">Insert</button
-        ><button data-tab="layout">Layout</button
-        ><button data-tab="review">Review</button
-        ><button data-tab="view">View</button
-        ><button data-tab="advanced">Advanced tools</button
-        ><button data-tab="developer">Developer</button
-        ><span class="tabs-tail"
-          >DOCUMENT STUDIO <span class="version">v0.2</span></span
-        >
-      </nav>
-      <section
-        class="ribbon"
-        id="ribbon"
-        aria-label="Formatting controls"
-      ></section>
+      <ribbon-web
+        id="word-ribbon"
+        theme="light"
+        aria-label="Document ribbon"
+      ></ribbon-web>
       <main class="workspace">
         <aside class="navigation" aria-label="Document navigation">
           <div class="pane-heading">
@@ -111,10 +98,10 @@
             <span>0</span><span>1</span><span>2</span><span>3</span
             ><span>4</span><span>5</span><span>6</span>
           </div>
-          <rich-text-box
+          <rich-text-page-editor
             id="editor"
             aria-label="Document content"
-          ></rich-text-box>
+          ></rich-text-page-editor>
           <div class="canvas-bottom">
             Click anywhere in the document to start writing.
           </div>
@@ -143,7 +130,7 @@
       </main>
       <footer class="statusbar">
         <button id="show-navigation">☷ <span>Navigation</span></button
-        ><span id="word-count">0 words</span
+        ><span id="page-status">Page 1</span><span id="word-count">0 words</span
         ><span id="selection-status">No selection</span
         ><span class="status-spacer"></span><span id="editor-mode">Editing</span
         ><button id="view-toggle">▣ <span>Page</span></button
@@ -151,7 +138,7 @@
         ><input
           id="zoom"
           type="range"
-          min="50"
+          min="25"
           max="150"
           value="100"
           aria-label="Zoom"

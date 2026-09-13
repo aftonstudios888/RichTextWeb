@@ -91,6 +91,37 @@ public sealed class RichTextDocumentClient : INotifyPropertyChanged, IDisposable
     public Task<JsonElement> ApplyPropertyValueAsync(string name, object? value, CancellationToken token = default) => InvokeAsync("applyProperty", new { name, value }, token);
     /// <summary>Executes a named editing command supported by the engine.</summary>
     public Task<JsonElement> ExecuteAsync(string command, object? parameter = null, CancellationToken token = default) => InvokeAsync("execute", new { command, parameter }, token);
+    /// <summary>Executes a named editing command only if the document still has the expected revision.</summary>
+    public Task<JsonElement> ExecuteAsync(string command, object? parameter, long expectedRevision, CancellationToken token = default) =>
+        InvokeAsync("execute", new { command, parameter, expectedRevision }, token);
+    /// <summary>Moves the selected rich text to a UTF-16 offset measured before the move.</summary>
+    public Task<JsonElement> MoveSelectionAsync(int destination, long? expectedRevision = null, CancellationToken token = default) =>
+        InvokeAsync("moveSelection", Parameters(("destination", destination), ("expectedRevision", expectedRevision)), token);
+    /// <summary>Moves contiguous sibling blocks into a block container while retaining their IDs.</summary>
+    public Task<JsonElement> MoveBlocksAsync(IEnumerable<string> ids, string parentId, int index, long? expectedRevision = null, CancellationToken token = default) =>
+        InvokeAsync("moveBlocks", Parameters(("ids", ids.ToArray()), ("parentId", parentId), ("index", index), ("expectedRevision", expectedRevision)), token);
+    /// <summary>Sets a model property on the identified element, including floating layout properties.</summary>
+    public Task<JsonElement> SetElementPropertyAsync(string id, string name, object? value, long? expectedRevision = null, CancellationToken token = default) =>
+        InvokeAsync("setElementProperty", PropertyParameters(name, value, expectedRevision, id), token);
+    /// <summary>Sets a property on the table containing the current selection.</summary>
+    public Task<JsonElement> SetTablePropertyAsync(string name, object? value, long? expectedRevision = null, CancellationToken token = default) =>
+        InvokeAsync("setTableProperty", PropertyParameters(name, value, expectedRevision), token);
+    /// <summary>Sets a property on the table cell containing the current selection.</summary>
+    public Task<JsonElement> SetCellPropertyAsync(string name, object? value, long? expectedRevision = null, CancellationToken token = default) =>
+        InvokeAsync("setCellProperty", PropertyParameters(name, value, expectedRevision), token);
+    /// <summary>Merges the selected cell and subsequent adjacent cells in its row.</summary>
+    public Task<JsonElement> MergeTableCellsAsync(int count = 2, long? expectedRevision = null, CancellationToken token = default) =>
+        InvokeAsync("mergeTableCells", Parameters(("count", count), ("expectedRevision", expectedRevision)), token);
+    /// <summary>Splits the selected merged cell according to its row and column spans.</summary>
+    public Task<JsonElement> SplitTableCellAsync(long? expectedRevision = null, CancellationToken token = default) =>
+        InvokeAsync("splitTableCell", Parameters(("expectedRevision", expectedRevision)), token);
+    /// <summary>Replaces a Figure or Floater story with canonical block JSON in one undoable transaction.</summary>
+    /// <remarks>Existing story annotations are mapped to the replacement text. Node IDs may reuse that story's IDs but may not collide with other document nodes.</remarks>
+    public Task<JsonElement> EditFloatingContentAsync(string id, JsonElement blocks, long? expectedRevision = null, CancellationToken token = default)
+    {
+        if (blocks.ValueKind != JsonValueKind.Array) throw new ArgumentException("Floating content must be a JSON array of canonical blocks", nameof(blocks));
+        return InvokeAsync("editFloatingContent", Parameters(("id", id), ("blocks", blocks), ("expectedRevision", expectedRevision)), token);
+    }
     /// <summary>Undoes the last engine transaction.</summary>
     public Task<JsonElement> UndoAsync(CancellationToken token = default) => InvokeAsync("undo", cancellationToken: token);
     /// <summary>Reapplies the last undone transaction.</summary>
@@ -123,6 +154,13 @@ public sealed class RichTextDocumentClient : INotifyPropertyChanged, IDisposable
 
     private static Dictionary<string, object?> Parameters(params (string Name, object? Value)[] pairs) =>
         pairs.Where(pair => pair.Value is not null).ToDictionary(pair => pair.Name, pair => pair.Value);
+
+    private static Dictionary<string, object?> PropertyParameters(string name, object? value, long? expectedRevision, string? id = null)
+    {
+        var parameters = Parameters(("name", name), ("expectedRevision", expectedRevision), ("id", id));
+        parameters["value"] = value; // Explicit null is a property value; only optional envelope members are omitted.
+        return parameters;
+    }
 
     private void Receive(string json)
     {

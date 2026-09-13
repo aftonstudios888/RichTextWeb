@@ -55,6 +55,16 @@ class ProtocolError extends Error {
     super(message);
   }
 }
+const structuredEditingCommands: Readonly<Record<string, string>> = {
+  moveselection: "moveSelection",
+  moveblocks: "moveBlocks",
+  setelementproperty: "setElementProperty",
+  settableproperty: "setTableProperty",
+  setcellproperty: "setCellProperty",
+  mergetablecells: "mergeTableCells",
+  splittablecell: "splitTableCell",
+  editfloatingcontent: "editFloatingContent",
+};
 const forbiddenKeys = new Set(["__proto__", "constructor", "prototype"]);
 function record(value: unknown): value is Record<string, unknown> {
   return (
@@ -184,6 +194,8 @@ const nodeTypes = new Set([
   "InlineUIContainer",
   "BlockUIContainer",
   "Image",
+  "Figure",
+  "Floater",
 ]);
 function validateDocument(
   value: unknown,
@@ -218,6 +230,21 @@ function validateDocument(
         `Duplicate node id: ${node.id}`,
       );
     ids.add(node.id);
+    if (node.type === "Table" && node.props.Columns !== undefined) {
+      if (!Array.isArray(node.props.Columns))
+        throw new ProtocolError(
+          "invalid_document",
+          "Table Columns must be an array",
+        );
+      for (const column of node.props.Columns) {
+        if (!record(column) || column.type !== "TableColumn")
+          throw new ProtocolError(
+            "invalid_document",
+            "Table Columns must contain TableColumn nodes",
+          );
+        visit(column, depth + 1);
+      }
+    }
     if (node.text !== undefined && typeof node.text !== "string")
       throw new ProtocolError("invalid_document", "Node text must be a string");
     if (node.children !== undefined) {
@@ -441,6 +468,138 @@ export class RichTextWebBridge implements IDisposable {
   NotifyReady(): void {
     this.emit("ready", this.GetState());
   }
+  /** JSON equivalents of structural engine operations. No executable callbacks cross the bridge. */
+  private editStructure(method: string, params: Record<string, unknown>): void {
+    const property = (): string => {
+      const name = stringParam(params, "name");
+      if (forbiddenKeys.has(name) || !/^[A-Za-z][A-Za-z0-9]{0,127}$/.test(name))
+        throw new ProtocolError(
+          "invalid_params",
+          "Property name must be an identifier",
+        );
+      if (!Object.hasOwn(params, "value"))
+        throw new ProtocolError("invalid_params", "Property value is required");
+      return name;
+    };
+    switch (method) {
+      case "moveSelection": {
+        const destination = integerParam(params, "destination");
+        if (destination < 0 || destination > this.Engine.Document.Text.length)
+          throw new ProtocolError(
+            "invalid_params",
+            "Destination must be inside the document",
+          );
+        this.Engine.MoveSelection(destination);
+        break;
+      }
+      case "moveBlocks": {
+        if (
+          !Array.isArray(params.ids) ||
+          !params.ids.length ||
+          params.ids.length > this.maxNodes ||
+          !params.ids.every((id) => typeof id === "string" && id.length > 0) ||
+          new Set(params.ids).size !== params.ids.length
+        )
+          throw new ProtocolError(
+            "invalid_params",
+            "ids must be a nonempty array of unique node IDs",
+          );
+        this.Engine.MoveBlocks(
+          params.ids as string[],
+          stringParam(params, "parentId"),
+          integerParam(params, "index"),
+        );
+        break;
+      }
+      case "setElementProperty":
+        this.Engine.SetElementProperty(
+          stringParam(params, "id"),
+          property(),
+          params.value,
+        );
+        break;
+      case "setTableProperty":
+        this.Engine.SetTableProperty(property(), params.value);
+        break;
+      case "setCellProperty":
+        this.Engine.SetCellProperty(property(), params.value);
+        break;
+      case "mergeTableCells": {
+        const count =
+          params.count === undefined ? 2 : integerParam(params, "count");
+        if (count < 2)
+          throw new ProtocolError(
+            "invalid_params",
+            "count must be at least two",
+          );
+        this.Engine.MergeTableCells(count);
+        break;
+      }
+      case "splitTableCell":
+        this.Engine.SplitTableCell();
+        break;
+      case "editFloatingContent": {
+        const id = stringParam(params, "id"),
+          target = this.Engine.Document.FindById(id);
+        if (!target || !["Figure", "Floater"].includes(target.Type))
+          throw new ProtocolError(
+            "invalid_params",
+            "Target must be a Figure or Floater",
+          );
+        if (!Array.isArray(params.blocks))
+          throw new ProtocolError(
+            "invalid_params",
+            "blocks must be a document node array",
+          );
+        const replacement = new FlowDocument().ToJSON();
+        replacement.children = params.blocks;
+        validateDocument(replacement, this.maxNodes, this.maxDepth);
+        // Canonical model construction validates parent/child categories and typed properties before any edit begins.
+        let canonical: DocumentNode[];
+        try {
+          canonical =
+            FlowDocument.FromJSON(replacement).ToJSON().children ?? [];
+        } catch (error) {
+          throw new ProtocolError(
+            "invalid_document",
+            error instanceof Error ? error.message : "Invalid floating story",
+          );
+        }
+        const oldIds = new Set<string>();
+        const visit = (
+          node: DocumentNode,
+          action: (node: DocumentNode) => void,
+        ): void => {
+          action(node);
+          for (const child of node.children ?? []) visit(child, action);
+          if (node.type === "Table")
+            for (const column of node.props.Columns ?? [])
+              visit(column, action);
+        };
+        for (const child of target.ToJSON().children ?? [])
+          visit(child, (node) => oldIds.add(node.id));
+        for (const child of canonical)
+          visit(child, (node) => {
+            if (this.Engine.Document.FindById(node.id) && !oldIds.has(node.id))
+              throw new ProtocolError(
+                "invalid_document",
+                `Floating story node ID conflicts with the main document: ${node.id}`,
+              );
+          });
+        this.Engine.EditFloatingContent(id, (story) => {
+          const snapshot = story.Document.ToJSON();
+          snapshot.children = canonical;
+          story.ReplaceDocument(FlowDocument.FromJSON(snapshot));
+        });
+        break;
+      }
+      default:
+        throw new ProtocolError(
+          "unknown_method",
+          `Unknown structured edit: ${method}`,
+        );
+    }
+  }
   /** Returns a response, without posting it. Events caused by an edit are still posted. */
   HandleMessage(input: unknown): BridgeResponse {
     let id: string | null = null;
@@ -468,6 +627,7 @@ export class RichTextWebBridge implements IDisposable {
         "updateNote",
         "insertTableOfContents",
         "updateTableOfContents",
+        ...Object.values(structuredEditingCommands),
       ]);
       if (mutating.has(request.method)) {
         if (this.options.isReadOnly?.())
@@ -672,6 +832,17 @@ export class RichTextWebBridge implements IDisposable {
           result = this.GetState();
           break;
         }
+        case "moveSelection":
+        case "moveBlocks":
+        case "setElementProperty":
+        case "setTableProperty":
+        case "setCellProperty":
+        case "mergeTableCells":
+        case "splitTableCell":
+        case "editFloatingContent":
+          this.editStructure(request.method, params);
+          result = this.GetState();
+          break;
         case "undo":
           this.Engine.Undo();
           result = this.GetState();
@@ -682,8 +853,64 @@ export class RichTextWebBridge implements IDisposable {
           break;
         case "execute": {
           const command = stringParam(params, "command");
-          // Engine Execute also validates command names; it does not reflect into object methods.
-          this.Engine.Execute(command, params.parameter);
+          const normalized = command
+            .replace(/^(EditingCommands|ApplicationCommands)\./, "")
+            .replace(/[\s_-]/g, "")
+            .toLowerCase();
+          const structured = Object.hasOwn(
+            structuredEditingCommands,
+            normalized,
+          )
+            ? structuredEditingCommands[normalized]
+            : undefined;
+          if (structured) {
+            const value = params.parameter;
+            const parameter = record(value) ? value : {};
+            // Preserve the engine's PascalCase DTO conventions and scalar move/merge overloads.
+            const converted: Record<string, unknown> = {};
+            for (const [source, target] of [
+              ["Id", "id"],
+              ["Ids", "ids"],
+              ["ParentId", "parentId"],
+              ["Index", "index"],
+              ["Name", "name"],
+              ["Value", "value"],
+              ["Destination", "destination"],
+              ["Count", "count"],
+              ["Blocks", "blocks"],
+            ])
+              if (Object.hasOwn(parameter, source!))
+                converted[target!] = parameter[source!];
+            if (structured === "moveSelection" && typeof value === "number")
+              converted.destination = value;
+            if (structured === "mergeTableCells" && typeof value === "number")
+              converted.count = value;
+            if (
+              structured !== "splitTableCell" &&
+              structured !== "mergeTableCells" &&
+              !record(value) &&
+              typeof value !== "number"
+            )
+              throw new ProtocolError(
+                "invalid_params",
+                "Structured editing command requires a JSON parameter object",
+              );
+            if (
+              structured === "mergeTableCells" &&
+              value !== undefined &&
+              value !== null &&
+              !record(value) &&
+              typeof value !== "number"
+            )
+              throw new ProtocolError(
+                "invalid_params",
+                "MergeTableCells requires a count",
+              );
+            this.editStructure(structured, converted);
+          } else {
+            // Engine Execute validates command names; it never reflects into arbitrary object methods.
+            this.Engine.Execute(command, params.parameter);
+          }
           result = this.GetState();
           break;
         }

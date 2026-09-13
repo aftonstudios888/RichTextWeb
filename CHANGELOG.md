@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+
+- Editable finite-page control with page/column navigation, floating Figure/Floater rich stories, anchored images and move/resize handles.
+- Opt-in continuous block virtualization, offscreen selection materialization and composition-safe editing.
+- Expanded WPF-style property metadata, owner registration, inheritance, coercion, read-only keys, styles/triggers and value-source inspection.
+- Tracked formatting, rich text/block moves and table/list structural revisions, conflict-aware rejection and merged-cell operations.
+- Protocol-2 rich coauthoring for blocks, tables, objects, properties and annotations, with causal delivery, snapshots and acknowledged checkpoints.
+- Original PDF text-showing operator inspection, replacement and removal with font encoding, preserved text advance and isolated shared Form edits, available in the reusable PDF control.
+- Native DOCX formatting/move/table revisions and anchored text-box stories; safe HTML/XAML floating-story interchange.
+- Word-style sample using RibbonWeb, Dockyard, TreeDataGridWeb, DynamicDataWeb, ReactiveWeb, RBushWeb and QuikGraphWeb through reusable editor controls.
+- Executable WinUI/Avalonia smoke applications, shared local asset server, Windows runtime gates and packaged native samples.
+- Updated dependencies, installed-consumer coverage and expanded real-browser regressions.
+
+See the compatibility matrix for precise pagination, property-system, revision, coauthoring, PDF-encoding and native-platform boundaries.
+
 ## 0.2.0
 
 - Live text positions with insertion gravity, snapshots, structural symbols and WPF-style context traversal.

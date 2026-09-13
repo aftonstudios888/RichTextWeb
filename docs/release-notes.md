@@ -1,20 +1,18 @@
-RichTextWeb 0.2.0 expands the shared engine and reusable controls with document review, measured pagination, advanced document features, PDF reconstruction, collaboration and native qualification.
+RichTextWeb 0.3.0 adds rich review and coauthoring, editable pages and floating stories, original PDF text-stream editing, broader WPF-style properties, and a Word-style sample built around reusable controls.
 
-- Live text positions with explicit WPF-style structural symbol traversal and UTF-16 conversion.
-- Reversible patch history and stable model/DOM identity. A 200,000-character edit regression retains less than 1.5 KB of undo patch data.
-- Authored tracked insertions/deletions, rich restoration and accept/reject commands.
-- Causal concurrent text/format operations, atomic replacements, snapshots, engine binding and a two-peer sample with paused delivery/reconnection.
-- Measured page viewer with page ranges/navigation, breaks/keep/widow behavior, headers/footers, footnotes and overflow diagnostics.
-- Fields, bookmarks/page references, table of contents, notes and mail merge, exposed through reusable toolbar, document-feature APIs and the validated native bridge.
-- DOCX headers/footers/notes/fields/TOC, comments/replies/bookmarks/revisions and safe opaque drawing dependency retention.
-- Optional PDF.js import/search/preview, reusable PDF editor with overlays/history/page operations, editable text reconstruction and export to a new PDF.
-- Packable shared/WPF/WinUI/Avalonia projects, real C#/Node tests, Windows WPF/WebView2 smoke checks, and a runnable native sample.
+- **Editing and review:** tracked character/paragraph/node formatting, rich text/block moves, table/list structural revisions, conflict-aware rejection and merged-cell-aware table operations. Common single-Run typing avoids full-document serialization.
+- **Pages and floating content:** `RichTextPageEditor` supplies editable finite pages and columns; Figure/Floater objects contain independently editable rich stories; anchored images and text boxes expose move/resize tools. Continuous `RichTextBox` can window top-level blocks and materialize selections for editing.
+- **Property system:** owner-aware dependency-property registration and metadata overrides, read-only keys, coercion, inheritance notifications, local/current values, styles/triggers and value-source inspection.
+- **Rich collaboration:** atomic protocol-2 operations for blocks, tables, images, floating stories, text, properties and annotations, with causal delivery, snapshots and acknowledged checkpoint epochs. The sample demonstrates paused and reversed delivery between reusable editors.
+- **PDF source editing:** inspect, replace and remove supported original text-showing operators with font-aware encoding, preserved advances and isolated shared-Form edits. The same operations are available through `PDFEditorControl`; PDF reconstruction remains available as a separate workflow.
+- **Interchange:** native DOCX formatting/move/row/cell revisions and anchored text-box stories, plus safe HTML/XAML floating-story interchange and a hash-bound extension for exact RichTextWeb review round trips.
+- **Sample:** published RibbonWeb, Dockyard, TreeDataGridWeb, DynamicDataWeb, ReactiveWeb, RBushWeb and QuikGraphWeb packages power the ribbon, dockable tools, explorer, reactive collections/view model, spatial hit testing and reference graph. Commands use the shared rich controls and toolbar.
+- **Native hosts:** executable WPF, WinUI and Avalonia Windows smoke applications, protocol checks, runtime gates, rendered evidence and native application/package archives.
 
-Validation: 172 Node tests, 57 grouped Chromium checks, installed ESM/CommonJS/strict TypeScript/standalone consumers, independent PDF fixture round trips, seven executable C# protocol groups, and 10 real Windows WPF/WebView2 smoke checks. Distribution is gated by both JavaScript and native CI, including actual WPF/WebView2 execution and WinUI compilation on Windows.
+Install with `npm install @wieslawsoltes/richtextweb@0.3.0`. The main editor is standalone; optional PDF.js capabilities ship through `/pdf` with browser worker/font assets. Release archives contain browser builds, source, sample, native packages/apps/evidence and SHA-256 checksums. npm publication uses provenance and verifies the registry bytes against the immutable release archive.
 
-Install with `npm install @wieslawsoltes/richtextweb@0.2.0`. The main editor remains standalone; the optional `/pdf` entry point has its own browser module and worker/font assets. Release archives include browser builds, source, the sample, native NuGet packages/sample/qualification evidence, and checksums. npm publication uses provenance and verifies the published bytes against the release tarball.
+Release validation: **289 Node tests**, **87 Chromium groups**, installed ESM/CommonJS/TypeScript/standalone consumers, eight shared C# protocol groups and actual Windows WPF/WinUI/Avalonia runtime checks.
 
-The compatibility matrix documents remaining boundaries. Exact Word pagination and complete WPF API parity are unfinished; the collaboration protocol does not merge arbitrary rich structures; PDF text editing reconstructs a separate flow document; WinUI/Avalonia UI and physical input/accessibility qualification remain separate. The official Avalonia NativeWebView requires its provider's runtime license.
+The [verification report](https://github.com/wieslawsoltes/RichTextWeb/blob/main/docs/VERIFICATION.md) describes the actual automated checks. The [compatibility matrix](https://github.com/wieslawsoltes/RichTextWeb/blob/main/docs/COMPATIBILITY.md) records remaining boundaries: browser pagination is not Word-identical; WPF semantics are not exhaustive; coauthoring intent depends on stable Run identities; PDF replacement is limited by encodings and supported operators; physical devices, accessibility and non-Windows Avalonia runtimes need separate qualification.
 
-Demo: https://wieslawsoltes.github.io/RichTextWeb/
-Compatibility: https://github.com/wieslawsoltes/RichTextWeb/blob/main/docs/COMPATIBILITY.md
+[Open Document Studio](https://wieslawsoltes.github.io/RichTextWeb/) · [API and integration](https://github.com/wieslawsoltes/RichTextWeb/blob/main/docs/INTEGRATION.md)

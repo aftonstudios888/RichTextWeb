@@ -1,40 +1,118 @@
-/** Two local peers demonstrate the reusable transport-neutral collaboration API. */
+/** Two full control instances share the transport-neutral rich document protocol. */
 export function openCollaborationDemo(RT) {
   const dialog = document.createElement("dialog");
   dialog.className = "collaboration-dialog";
   dialog.innerHTML =
-    '<div class="dialog-title"><h2>Collaborative editing</h2><button data-close>Close</button></div><p class="note">Two local replicas exchange character operations. Pause delivery, edit both documents, then reconnect to test concurrent changes. Your application supplies authentication, persistence, and the network transport.</p><div class="collaboration-actions"><button data-network>Pause delivery</button><span data-status role="status">Connected · local demonstration</span></div><div class="collaboration-peers"></div>';
-  const text =
-    "A shared document\nEdit this text from either peer. Changes merge through the reusable engine.";
+    '<div class="dialog-title"><h2>Coauthor a rich document</h2><button data-close>Close</button></div><p class="note">Edit text, tables, pictures, and formatting in both documents. Pause delivery to work independently, then reconnect to merge changes. This local demonstration sends the same operations an application can carry over its authenticated transport.</p><div class="collaboration-actions"><button data-network>Pause delivery</button><button data-checkpoint>Compact acknowledged history</button><span data-status role="status">Connected</span></div><div class="collaboration-peers"></div>';
+  const picture = document.createElement("canvas");
+  picture.width = 160;
+  picture.height = 90;
+  const context = picture.getContext("2d");
+  context.fillStyle = "#185abd";
+  context.fillRect(0, 0, 160, 90);
+  context.fillStyle = "white";
+  context.beginPath();
+  context.arc(38, 45, 23, 0, Math.PI * 2);
+  context.fill();
+  context.font = "bold 18px sans-serif";
+  context.fillText("Shared", 72, 52);
+  const sharedPicture = picture.toDataURL("image/png");
+  const seed = RT.fromText(
+    "A shared document\nEdit this document together. Text, tables, pictures, and document properties can merge while peers are offline.",
+  );
   const sessions = ["Ada", "Grace"].map(
     (ActorId) =>
-      new RT.CollaborativeTextSession({
-        DocumentId: "local-demo",
+      new RT.CollaborativeDocumentSession({
+        DocumentId: "local-rich-demo",
         ActorId,
-        Text: text,
+        Document: seed.ToJSON(),
       }),
   );
   const disposables = [],
     editors = [],
     queue = [];
   let paused = false;
-  const status = () =>
-    (dialog.querySelector("[data-status]").textContent = paused
-      ? `Delivery paused · ${queue.length} queued operations`
-      : `Connected · replicas ${sessions[0].Text === sessions[1].Text ? "agree" : "are synchronizing"}`);
+  const status = () => {
+    const agrees =
+      JSON.stringify(sessions[0].DocumentJSON) ===
+      JSON.stringify(sessions[1].DocumentJSON);
+    dialog.querySelector("[data-status]").textContent = paused
+      ? `Delivery paused · ${queue.length} queued transactions`
+      : `Connected · replicas ${agrees ? "agree" : "are synchronizing"} · ${sessions[0].Statistics.Nodes} nodes · ${sessions[0].Statistics.Operations} transactions`;
+    dialog.querySelector("[data-checkpoint]").disabled =
+      paused || queue.length > 0 || !agrees;
+  };
+  const execute = (action) => {
+    try {
+      action();
+      status();
+    } catch (error) {
+      dialog.querySelector("[data-status]").textContent = error.message;
+    }
+  };
   sessions.forEach((session, index) => {
-    const peer = document.createElement("section");
-    const label = document.createElement("h3");
+    const peer = document.createElement("section"),
+      label = document.createElement("h3");
     label.textContent = session.ActorId;
     const editor = document.createElement("rich-text-box");
-    editor.Document = RT.fromText(text);
+    editor.Document = RT.FlowDocument.FromJSON(seed.ToJSON());
     editor.ViewMode = "continuous";
     editor.setAttribute("aria-label", `${session.ActorId}'s document`);
     editors.push(editor);
     const toolbar = document.createElement("rich-text-toolbar");
     toolbar.Editor = editor;
-    toolbar.Mode = "home";
-    peer.append(label, toolbar, editor);
+    toolbar.Mode = "all";
+    const scenarios = document.createElement("div");
+    scenarios.className = "collaboration-actions";
+    for (const [label, action] of [
+      [
+        "Add paragraph",
+        () =>
+          editor.Engine.Change(() => {
+            editor.Document.Blocks.Add(
+              new RT.Paragraph(
+                new RT.Run(`${session.ActorId} added a paragraph.`),
+              ),
+            );
+          }),
+      ],
+      [
+        "Add table",
+        () => {
+          editor.Engine.Select(editor.Document.Text.length);
+          editor.Engine.InsertTable(2, 2);
+        },
+      ],
+      [
+        "Add picture",
+        () => {
+          editor.Engine.Select(editor.Document.Text.length);
+          editor.Engine.InsertImage(
+            sharedPicture,
+            `${session.ActorId}'s shared picture`,
+            160,
+            90,
+          );
+        },
+      ],
+      [
+        "Format title",
+        () => {
+          editor.Engine.Select(0, "A shared document".length);
+          editor.Engine.ApplyProperty("FontWeight", "Bold");
+          editor.Engine.ApplyProperty(
+            "Foreground",
+            index ? "#7c3aed" : "#185abd",
+          );
+        },
+      ],
+    ]) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.onclick = () => execute(action);
+      scenarios.append(button);
+    }
+    peer.append(label, toolbar, scenarios, editor);
     dialog.querySelector(".collaboration-peers").append(peer);
     disposables.push(session.BindEngine(editor.Engine));
     disposables.push(
@@ -50,17 +128,24 @@ export function openCollaborationDemo(RT) {
       }),
     );
   });
-  dialog.querySelector("[data-network]").onclick = () => {
-    paused = !paused;
-    if (!paused) {
-      for (const [index, operation] of queue.splice(0).reverse())
-        sessions[index].Receive(operation);
-    }
-    dialog.querySelector("[data-network]").textContent = paused
-      ? "Reconnect and merge"
-      : "Pause delivery";
-    status();
-  };
+  dialog.querySelector("[data-network]").onclick = () =>
+    execute(() => {
+      paused = !paused;
+      if (!paused)
+        for (const [index, operation] of queue.splice(0).reverse())
+          sessions[index].Receive(operation);
+      dialog.querySelector("[data-network]").textContent = paused
+        ? "Reconnect and merge"
+        : "Pause delivery";
+    });
+  dialog.querySelector("[data-checkpoint]").onclick = () =>
+    execute(() => {
+      const acknowledgements = Object.fromEntries(
+        sessions.map((session) => [session.ActorId, session.VersionVector]),
+      );
+      const checkpoint = sessions[0].CreateCheckpoint(acknowledgements);
+      sessions.forEach((session) => session.AdoptCheckpoint(checkpoint));
+    });
   dialog.querySelector("[data-close]").onclick = () => dialog.close();
   dialog.onclose = () => {
     disposables.forEach((item) => item.Dispose());
@@ -74,4 +159,5 @@ export function openCollaborationDemo(RT) {
   dialog.showModal();
   dialog.sessions = sessions;
   dialog.editors = editors;
+  status();
 }

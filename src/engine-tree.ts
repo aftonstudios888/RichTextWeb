@@ -41,7 +41,15 @@ export function newIds(node: DocumentNode): DocumentNode {
 export function inlineText(node: DocumentNode): string {
   if (node.type === "Run") return node.text ?? "";
   if (node.type === "LineBreak") return "\n";
-  if (["Image", "InlineUIContainer", "BlockUIContainer"].includes(node.type))
+  if (
+    [
+      "Image",
+      "InlineUIContainer",
+      "BlockUIContainer",
+      "Figure",
+      "Floater",
+    ].includes(node.type)
+  )
     return "\uFFFC";
   return (node.children ?? []).map(inlineText).join("");
 }
@@ -102,6 +110,8 @@ export function leaves(root: DocumentNode): TextLeaf[] {
         "Image",
         "InlineUIContainer",
         "BlockUIContainer",
+        "Figure",
+        "Floater",
       ].includes(node.type)
     ) {
       const length = inlineText(node).length;
@@ -130,7 +140,7 @@ export function sliceInlines(
       if (copy.type === "Run") copy.text = (copy.text ?? "").slice(from, to);
       else if (
         copy.children &&
-        !["InlineUIContainer", "Image"].includes(copy.type)
+        !["InlineUIContainer", "Image", "Figure", "Floater"].includes(copy.type)
       )
         copy.children = sliceInlines(copy.children, from, to);
       if (fresh) copy = newIds(copy);
@@ -332,7 +342,9 @@ export function formatRange(
     if (base >= end || base + length <= start) return [node];
     if (
       node.type === "Run" ||
-      ["Image", "InlineUIContainer", "LineBreak"].includes(node.type)
+      ["Image", "InlineUIContainer", "LineBreak", "Figure", "Floater"].includes(
+        node.type,
+      )
     ) {
       const from = Math.max(0, start - base),
         to = Math.min(length, end - base);
@@ -379,6 +391,14 @@ export function mapMetadata(
   const items = root.props.Annotations;
   if (Array.isArray(items))
     for (const item of items) {
+      if (item.Kind === "Formatting")
+        for (const change of item.Data?.PropertyChanges ?? [])
+          if (change.Scope === "Inline") {
+            change.Start = move(change.Start, false);
+            change.End = Math.max(change.Start, move(change.End, true));
+          }
+      if (item.Kind === "Move" && Number.isInteger(item.Data?.SourceStart))
+        item.Data.SourceStart = move(item.Data.SourceStart, false);
       item.Start = move(item.Start, false);
       item.End =
         item.Kind === "Deletion"

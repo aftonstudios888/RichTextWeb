@@ -8,6 +8,8 @@ export interface PageSettings {
   ContentWidth: number;
   ContentHeight: number;
   ColumnGap: number;
+  ColumnCount: number;
+  TextColumnWidth: number;
   FootnoteHeight: number;
 }
 export interface PageLayoutPage {
@@ -78,16 +80,33 @@ export function pageSettings(props: Record<string, any>): PageSettings {
         Math.min(PageHeight / 3, length(props.FootnoteAreaHeight, 96)),
       )
     : 0;
+  const ContentWidth = PageWidth - Padding.Left - Padding.Right;
+  const ColumnCount = Math.max(
+    1,
+    Math.min(12, Math.floor(Number(props.ColumnCount) || 1)),
+  );
+  const ColumnGap = Math.max(
+    0,
+    Math.min(
+      ContentWidth / Math.max(1, ColumnCount),
+      length(props.ColumnGap, 32),
+    ),
+  );
   return {
     PageWidth,
     PageHeight,
     Padding,
-    ContentWidth: PageWidth - Padding.Left - Padding.Right,
+    ContentWidth,
     ContentHeight: Math.max(
       24,
       PageHeight - Padding.Top - Padding.Bottom - FootnoteHeight,
     ),
-    ColumnGap: 32,
+    ColumnGap,
+    ColumnCount,
+    TextColumnWidth: Math.max(
+      1,
+      (ContentWidth - (ColumnCount - 1) * ColumnGap) / ColumnCount,
+    ),
     FootnoteHeight,
   };
 }
@@ -170,13 +189,13 @@ export function measurePageLayout(
     }
     for (const rect of rects) {
       const PageNumber = pageOf(rect) + 1;
-      if (rect.width / zoom > settings.ContentWidth + 1)
+      if (rect.width / zoom > settings.TextColumnWidth + 1)
         overflows.push({
           ElementId: element.dataset.rtId || "",
           PageNumber,
           Reason: "width",
           Measured: rect.width / zoom,
-          Available: settings.ContentWidth,
+          Available: settings.TextColumnWidth,
         });
       if (leaf.atomic && rect.height / zoom > settings.ContentHeight + 1)
         overflows.push({

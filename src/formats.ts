@@ -1,4 +1,13 @@
-import { FlowDocument, type DocumentNode } from "./model.js";
+import {
+  FlowDocument,
+  FigureLength,
+  FigureUnitType,
+  FigureHorizontalAnchor,
+  FigureVerticalAnchor,
+  WrapDirection,
+  type DocumentNode,
+} from "./model.js";
+import { normalizeFloatingLayout } from "./floating-layout.js";
 import { marked } from "marked";
 import {
   parseMarkup,
@@ -143,13 +152,199 @@ function styles(props: Record<string, any>): string {
   if (props.BreakPageBefore) add("break-before", "page");
   return result.join(";");
 }
-function htmlNode(node: DocumentNode): string {
+const floatingBlockDisplays: Record<string, string> = {
+  p: "block",
+  section: "block",
+  div: "block",
+  h1: "block",
+  h2: "block",
+  h3: "block",
+  h4: "block",
+  h5: "block",
+  h6: "block",
+  table: "table",
+  tbody: "table-row-group",
+  tr: "table-row",
+  td: "table-cell",
+  ol: "block",
+  ul: "block",
+  li: "list-item",
+};
+const floatingPropertyNames = new Set([
+  "Width",
+  "Height",
+  "WrapStyle",
+  "HorizontalAlignment",
+  "HorizontalOffset",
+  "VerticalOffset",
+  "Rotation",
+  "WrapDistance",
+  "Shape",
+  "HorizontalAnchor",
+  "VerticalAnchor",
+  "WrapDirection",
+  "CanDelayPlacement",
+]);
+function floatingProperties(props: unknown): Record<string, any> {
+  if (!props || typeof props !== "object" || Array.isArray(props)) return {};
+  return Object.fromEntries(
+    Object.entries(props).filter(([key]) => floatingPropertyNames.has(key)),
+  );
+}
+function safeFloatingProperties(
+  props: unknown,
+  kind: "Figure" | "Floater" | "Image",
+): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const [key, value] of Object.entries(floatingProperties(props))) {
+    try {
+      if (
+        (key === "Width" || key === "Height") &&
+        value &&
+        typeof value === "object"
+      ) {
+        if (
+          kind !== "Figure" ||
+          Array.isArray(value) ||
+          typeof value.Value !== "number" ||
+          !Object.values(FigureUnitType).includes(value.FigureUnitType)
+        )
+          continue;
+        result[key] = new FigureLength(
+          value.Value,
+          value.FigureUnitType,
+        ).toJSON();
+      } else if (
+        key === "HorizontalAnchor" ||
+        key === "VerticalAnchor" ||
+        key === "WrapDirection"
+      ) {
+        if (kind !== "Figure") continue;
+        const allowed =
+          key === "HorizontalAnchor"
+            ? FigureHorizontalAnchor
+            : key === "VerticalAnchor"
+              ? FigureVerticalAnchor
+              : WrapDirection;
+        if (
+          typeof value === "string" &&
+          Object.values(allowed).includes(value as any)
+        )
+          result[key] = value;
+      } else if (key === "CanDelayPlacement") {
+        if (kind === "Figure" && typeof value === "boolean")
+          result[key] = value;
+      } else {
+        if (kind === "Floater" && key === "Height") continue;
+        if ((key === "Width" || key === "Height") && value === 0) {
+          result[key] = 0;
+          continue;
+        }
+        Object.assign(result, normalizeFloatingLayout({ [key]: value }));
+      }
+    } catch {
+      /* Invalid external layout values are omitted; safe story content remains. */
+    }
+  }
+  return result;
+}
+function readFloatingProperties(
+  raw: string | undefined,
+  kind: "Figure" | "Floater" | "Image",
+): Record<string, any> {
+  if (!raw || raw.length > 4096) return {};
+  try {
+    return safeFloatingProperties(JSON.parse(raw), kind);
+  } catch {
+    return {};
+  }
+}
+function floatingStyleProperties(
+  props: Record<string, any>,
+  kind: "Figure" | "Floater" | "Image",
+): Record<string, any> {
+  const result = { ...props };
+  delete result.Width;
+  delete result.Height;
+  for (const key of ["Width", "Height"]) {
+    const value = props[key];
+    if (typeof value === "number")
+      Object.assign(result, safeFloatingProperties({ [key]: value }, kind));
+    else if (
+      kind === "Figure" &&
+      typeof value === "string" &&
+      /^\d+(?:\.\d+)?%$/.test(value)
+    ) {
+      const fraction = parseFloat(value) / 100;
+      if (fraction <= 1)
+        result[key] = new FigureLength(fraction, "Content").toJSON();
+    }
+  }
+  return result;
+}
+function floatingStyles(props: Record<string, any>): string {
+  const wrap = props.WrapStyle ?? "Square",
+    align =
+      props.HorizontalAlignment ??
+      (/Left/.test(props.HorizontalAnchor) ? "Left" : "Right");
+  const result = [
+    "display:inline-block",
+    "position:relative",
+    "max-width:100%",
+  ];
+  if (wrap === "Square" || wrap === "Tight")
+    result.push(`float:${align === "Left" ? "left" : "right"}`);
+  if (wrap === "TopAndBottom") result.push("display:block", "clear:both");
+  if (wrap === "BehindText" || wrap === "InFrontOfText")
+    result.push(
+      "position:absolute",
+      `z-index:${wrap === "BehindText" ? 0 : 1}`,
+    );
+  for (const name of ["Width", "Height"] as const) {
+    const value = props[name],
+      number =
+        typeof value === "number"
+          ? value
+          : value?.FigureUnitType === "Pixel"
+            ? value.Value
+            : undefined;
+    if (Number.isFinite(number) && number >= 0)
+      result.push(`${name.toLowerCase()}:${Math.min(20000, number)}px`);
+    else if (
+      ["Page", "Content"].includes(value?.FigureUnitType) &&
+      Number.isFinite(value.Value)
+    )
+      result.push(
+        `${name.toLowerCase()}:${Math.min(100, Math.max(0, value.Value * 100))}%`,
+      );
+  }
+  for (const [name, css] of [
+    ["HorizontalOffset", "left"],
+    ["VerticalOffset", "top"],
+    ["WrapDistance", "margin"],
+  ])
+    if (Number.isFinite(props[name]))
+      result.push(`${css}:${Math.max(-20000, Math.min(20000, props[name]))}px`);
+  if (wrap === "Tight" && props.Shape === "Ellipse")
+    result.push("shape-outside:ellipse(50% 50%)");
+  if (Number.isFinite(props.Rotation))
+    result.push(
+      `transform:rotate(${Math.max(-360, Math.min(360, props.Rotation))}deg)`,
+    );
+  return result.join(";");
+}
+function htmlNode(node: DocumentNode, phrasingBlocks = false): string {
   const p = node.props ?? {},
     css = styles(p),
     attr = css ? ` style="${escapeMarkup(css)}"` : "";
-  const body = (node.children ?? []).map(htmlNode).join("");
+  const floating = node.type === "Figure" || node.type === "Floater";
+  const body = (node.children ?? [])
+    .map((child) => htmlNode(child, phrasingBlocks || floating))
+    .join("");
   const wrap = (tag: string, extra = "") =>
-    `<${tag}${attr}${extra}>${body}</${tag}>`;
+    phrasingBlocks && floatingBlockDisplays[tag]
+      ? `<span data-rt-block="${tag}" style="display:${floatingBlockDisplays[tag]}${css ? ";" + escapeMarkup(css) : ""}"${extra}>${body}</span>`
+      : `<${tag}${attr}${extra}>${body}</${tag}>`;
   switch (node.type) {
     case "FlowDocument":
       return `<article data-richtextweb="document"${attr}>${body}</article>`;
@@ -210,10 +405,20 @@ function htmlNode(node: DocumentNode): string {
       );
     case "Image": {
       const src = safeURL(p.Source, true);
+      const layout = safeFloatingProperties(p, "Image");
+      const floatingImage = Object.keys(layout).some(
+        (key) => key !== "Width" && key !== "Height",
+      );
+      const imageCss = [css, floatingImage ? floatingStyles(layout) : ""]
+        .filter(Boolean)
+        .join(";");
       return src
-        ? `<img${attr} src="${escapeMarkup(src)}" alt="${escapeMarkup(p.AlternativeText ?? "")}">`
+        ? `<img${imageCss ? ` style="${escapeMarkup(imageCss)}"` : ""}${Object.keys(layout).length ? ` data-rt-layout="${escapeMarkup(JSON.stringify(layout))}"` : ""} src="${escapeMarkup(src)}" alt="${escapeMarkup(p.AlternativeText ?? "")}">`
         : escapeMarkup(p.AlternativeText ?? "");
     }
+    case "Figure":
+    case "Floater":
+      return `<span data-rt-floating="${node.type}" data-rt-layout="${escapeMarkup(JSON.stringify(safeFloatingProperties(p, node.type as "Figure" | "Floater")))}" style="${escapeMarkup(css + ";" + floatingStyles(p))}">${body}</span>`;
     case "InlineUIContainer":
       return wrap("span");
     case "BlockUIContainer":
@@ -370,6 +575,33 @@ function htmlInlines(
       continue;
     }
     if (suppressedHTML.has(name)) continue;
+    if (
+      node.attrs["data-rt-floating"] === "Figure" ||
+      node.attrs["data-rt-floating"] === "Floater"
+    ) {
+      const kind = node.attrs["data-rt-floating"];
+      const restored = (item: MarkupNode): MarkupNode => ({
+        ...item,
+        name:
+          item.name === "span" &&
+          Object.prototype.hasOwnProperty.call(
+            floatingBlockDisplays,
+            item.attrs["data-rt-block"],
+          )
+            ? item.attrs["data-rt-block"]
+            : item.name,
+        children: item.children.map(restored),
+      });
+      const layout = readFloatingProperties(node.attrs["data-rt-layout"], kind);
+      const blocks = htmlBlockNodes(node.children.map(restored), preserveSpace);
+      result.push(
+        makeNode(kind, blocks.length ? blocks : [paragraph([])], {
+          ...floatingStyleProperties(p, kind),
+          ...layout,
+        }),
+      );
+      continue;
+    }
     if (name === "br") {
       result.push(makeNode("LineBreak"));
       continue;
@@ -380,6 +612,7 @@ function htmlInlines(
         result.push(
           makeNode("Image", [], {
             ...p,
+            ...readFloatingProperties(node.attrs["data-rt-layout"], "Image"),
             Source: source,
             AlternativeText: node.attrs.alt ?? "",
             ...(node.attrs.width
@@ -592,6 +825,9 @@ function markdownInline(node: DocumentNode): string {
         ? `![${escape(String(node.props.AlternativeText ?? ""))}](${uri.replace(/[()\s]/g, (c) => encodeURIComponent(c))})`
         : "";
     }
+    case "Figure":
+    case "Floater":
+      return "\n\n" + markdownBlocks(node.children ?? []) + "\n\n";
     case "LineBreak":
       return "  \n";
     default:
@@ -682,12 +918,15 @@ const knownTypes = new Set([
   "List",
   "ListItem",
   "Table",
+  "TableColumn",
   "TableRowGroup",
   "TableRow",
   "TableCell",
   "InlineUIContainer",
   "BlockUIContainer",
   "Image",
+  "Figure",
+  "Floater",
 ]);
 const knownProperties = new Set([
   "FontFamily",
@@ -720,6 +959,7 @@ const knownProperties = new Set([
   "KeepTogether",
   "KeepWithNext",
   "BaselineAlignment",
+  ...floatingPropertyNames,
 ]);
 const numericProperties = new Set([
   "FontSize",
@@ -733,12 +973,22 @@ const numericProperties = new Set([
   "StartIndex",
   "RowSpan",
   "ColumnSpan",
+  "HorizontalOffset",
+  "VerticalOffset",
+  "Rotation",
+  "WrapDistance",
 ]);
 function xamlNode(node: DocumentNode, root = false): string {
   const props = Object.entries(node.props ?? {})
     .filter(([key, value]) => knownProperties.has(key) && value != null)
     .map(([key, value]) => {
-      if (typeof value === "object")
+      if (
+        node.type === "Figure" &&
+        (key === "Width" || key === "Height") &&
+        typeof value === "object"
+      )
+        value = new FigureLength(value.Value, value.FigureUnitType).ToString();
+      else if (typeof value === "object")
         value = [
           value.Left ?? 0,
           value.Top ?? 0,
@@ -752,7 +1002,13 @@ function xamlNode(node: DocumentNode, root = false): string {
     (root
       ? ' xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xml:space="preserve"'
       : "") + props;
-  return `<${node.type}${attrs}>${node.type === "Run" ? escapeMarkup(node.text ?? "") : (node.children ?? []).map((n) => xamlNode(n)).join("")}</${node.type}>`;
+  const columns =
+    node.type === "Table" &&
+    Array.isArray(node.props.Columns) &&
+    node.props.Columns.length
+      ? `<Table.Columns>${node.props.Columns.map((column: DocumentNode) => xamlNode(column)).join("")}</Table.Columns>`
+      : "";
+  return `<${node.type}${attrs}>${columns}${node.type === "Run" ? escapeMarkup(node.text ?? "") : (node.children ?? []).map((n) => xamlNode(n)).join("")}</${node.type}>`;
 }
 export function toXAML(doc: FlowDocument): string {
   return xamlNode(doc.ToJSON(), true);
@@ -787,11 +1043,23 @@ export function fromXAML(xaml: string): FlowDocument {
       if (key === "Source" || key === "NavigateUri") {
         const uri = safeURL(value, key === "Source");
         if (uri) props[key] = uri;
+      } else if (name === "Figure" && (key === "Width" || key === "Height")) {
+        props[key] = FigureLength.Parse(value).toJSON();
+      } else if (name === "TableColumn" && key === "Width") {
+        if (/^(?:Auto|\*|(?:\d+(?:\.\d+)?|\.\d+)\*)$/i.test(value))
+          props[key] = value;
+        else if (Number.isFinite(Number(value)) && Number(value) >= 0)
+          props[key] = Number(value);
       } else if (numericProperties.has(key)) {
         const n = Number(value);
         if (Number.isFinite(n)) props[key] = n;
       } else if (
-        ["BreakPageBefore", "KeepTogether", "KeepWithNext"].includes(key)
+        [
+          "BreakPageBefore",
+          "KeepTogether",
+          "KeepWithNext",
+          "CanDelayPlacement",
+        ].includes(key)
       )
         props[key] = value.toLowerCase() === "true";
       else if (["Margin", "Padding", "PagePadding"].includes(key)) {
@@ -807,6 +1075,24 @@ export function fromXAML(xaml: string): FlowDocument {
                   Bottom: parts[3] ?? parts[1],
                 };
       } else props[key] = value;
+    }
+    if (name === "Table") {
+      const propertyNodes = node.children.filter(
+        (child) => child.name.split(":").pop() === "Table.Columns",
+      );
+      if (propertyNodes.length) {
+        props.Columns = propertyNodes.flatMap((property) =>
+          property.children.flatMap((child) =>
+            convert(child, "Table.Columns", preserve),
+          ),
+        );
+        if (
+          props.Columns.some(
+            (column: DocumentNode) => column.type !== "TableColumn",
+          )
+        )
+          throw new TypeError("Table.Columns requires TableColumn children.");
+      }
     }
     const text =
       name === "Run" ? (node.attrs.Text ?? textContent(node)) : undefined;

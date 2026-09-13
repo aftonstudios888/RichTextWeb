@@ -1,4 +1,5 @@
-import type { DocumentNode } from "./model.js";
+import type { DocumentNode, TextElement } from "./model.js";
+import type { VirtualWindow } from "./virtualization.js";
 
 /** DOM positions are UTF-16 text offsets, including paragraph separators. */
 export interface DOMPosition {
@@ -20,6 +21,77 @@ export interface RenderStatistics {
   Reused: number;
   Updated: number;
   Removed: number;
+}
+
+const renderedProperties = [
+  "FontFamily",
+  "FontSize",
+  "FontWeight",
+  "FontStyle",
+  "FontStretch",
+  "Foreground",
+  "Background",
+  "TextDecorations",
+  "TextAlignment",
+  "FlowDirection",
+  "Margin",
+  "Padding",
+  "LineHeight",
+  "TextIndent",
+  "Width",
+  "Height",
+  "BreakPageBefore",
+  "KeepTogether",
+  "KeepWithNext",
+  "Widows",
+  "Orphans",
+  "BaselineAlignment",
+  "BorderBrush",
+  "BorderThickness",
+  "Language",
+  "CharacterSpacing",
+  "IsHyphenationEnabled",
+  "PageWidth",
+  "PageHeight",
+  "PagePadding",
+  "ColumnCount",
+  "ColumnGap",
+  "WrapStyle",
+  "HorizontalAnchor",
+  "VerticalAnchor",
+  "HorizontalAlignment",
+  "HorizontalOffset",
+  "VerticalOffset",
+  "WrapDirection",
+  "WrapDistance",
+  "Rotation",
+  "Shape",
+];
+
+/** Render effective property values while leaving portable serialization as local base values. */
+export function applyEffectiveStyleValues(
+  node: DocumentNode,
+  model: TextElement,
+  window?: VirtualWindow,
+  includeChildren = true,
+): void {
+  for (const name of renderedProperties) {
+    const source = model.GetValueSource(name);
+    if (
+      source.BaseValueSource !== "Default" ||
+      source.IsCoerced ||
+      source.IsCurrent
+    ) {
+      const value = model.GetValue(name);
+      if (value !== undefined) node.props[name] = value;
+    }
+  }
+  if (!includeChildren) return;
+  for (let index = 0; index < (node.children?.length || 0); index++) {
+    if (window && !window.Realized.has(index)) continue;
+    const child = model.Children[index];
+    if (child) applyEffectiveStyleValues(node.children![index], child);
+  }
 }
 
 /** Commit a detached render by stable document IDs, retaining live DOM identity. */
@@ -140,6 +212,16 @@ export function safeImageSource(value: unknown): string | undefined {
 }
 
 function cssLength(value: unknown): string | undefined {
+  if (value && typeof value === "object") {
+    const figure = value as { Value?: number; FigureUnitType?: string };
+    if (figure.FigureUnitType === "Auto") return "auto";
+    if (figure.FigureUnitType === "Pixel") return cssLength(figure.Value);
+    if (
+      ["Column", "Content", "Page"].includes(figure.FigureUnitType || "") &&
+      Number.isFinite(figure.Value)
+    )
+      return `${Number(figure.Value) * 100}%`;
+  }
   if (typeof value === "number" && Number.isFinite(value)) return `${value}px`;
   if (
     typeof value === "string" &&
@@ -181,6 +263,12 @@ function applyStyle(element: HTMLElement, props: Record<string, any>): void {
   if (fontSize) s.fontSize = fontSize;
   if (props.FontWeight) s.fontWeight = String(props.FontWeight).toLowerCase();
   if (props.FontStyle) s.fontStyle = String(props.FontStyle).toLowerCase();
+  if (props.FontStretch)
+    s.fontStretch = String(props.FontStretch)
+      .replace(/([a-z])([A-Z])/g, "$1-$2")
+      .toLowerCase();
+  if (Number.isFinite(props.CharacterSpacing))
+    s.letterSpacing = `${props.CharacterSpacing / 1000}em`;
   if (props.Foreground) s.color = String(props.Foreground);
   if (props.Background) s.backgroundColor = String(props.Background);
   if (props.TextDecorations) {
@@ -233,6 +321,112 @@ function applyStyle(element: HTMLElement, props: Record<string, any>): void {
     s.borderStyle = "solid";
   }
   if (typeof props.Language === "string") element.lang = props.Language;
+  if (props.IsHyphenationEnabled !== undefined)
+    s.hyphens = props.IsHyphenationEnabled ? "auto" : "manual";
+}
+
+function applyFloatingStyle(
+  element: HTMLElement,
+  props: Record<string, any>,
+  anchored: boolean,
+): void {
+  const style = element.style;
+  const anchor = String(
+    props.HorizontalAnchor || props.HorizontalAlignment || "Right",
+  );
+  const alignment = /Left$/.test(anchor)
+    ? "left"
+    : /Center$/.test(anchor)
+      ? "center"
+      : "right";
+  const wrapping = String(
+    props.WrapStyle ||
+      (props.WrapDirection === "None"
+        ? "TopAndBottom"
+        : anchored
+          ? "Square"
+          : "Inline"),
+  );
+  element.dataset.rtWrap = wrapping;
+  const offsetX = Number.isFinite(props.HorizontalOffset)
+    ? props.HorizontalOffset
+    : 0;
+  const offsetY = Number.isFinite(props.VerticalOffset)
+    ? props.VerticalOffset
+    : 0;
+  const distance = Number.isFinite(props.WrapDistance)
+    ? Math.max(0, props.WrapDistance)
+    : 12;
+  if (anchored) {
+    style.display = "block";
+    style.width ||= "240px";
+    style.maxWidth = "100%";
+    style.whiteSpace = "normal";
+    style.overflow = "hidden";
+    style.breakInside = "avoid";
+    element.setAttribute("role", "group");
+    element.setAttribute(
+      "aria-label",
+      String(props.AlternativeText || "Floating text content"),
+    );
+  }
+  if (wrapping === "Square" || wrapping === "Tight") {
+    style.cssFloat =
+      props.WrapDirection === "Left"
+        ? "right"
+        : props.WrapDirection === "Right"
+          ? "left"
+          : alignment === "left"
+            ? "left"
+            : "right";
+    style.margin =
+      style.cssFloat === "left"
+        ? `${offsetY}px ${distance}px ${distance}px ${distance + offsetX}px`
+        : `${offsetY}px ${distance - offsetX}px ${distance}px ${distance}px`;
+    if (wrapping === "Tight")
+      style.shapeOutside =
+        props.Shape === "Ellipse" ? "ellipse(50% 50%)" : "inset(0)";
+    style.shapeMargin = `${distance}px`;
+    if (alignment === "center")
+      element.dataset.rtLayoutWarning =
+        "A centered wrapped object uses the right float edge; use TopAndBottom for centered placement.";
+  } else if (wrapping === "TopAndBottom") {
+    style.display = "block";
+    style.clear = "both";
+    style.marginTop = `${Math.max(0, offsetY)}px`;
+    style.marginBottom = `${distance}px`;
+    style.marginLeft =
+      alignment === "left" ? `${Math.max(0, offsetX)}px` : "auto";
+    style.marginRight =
+      alignment === "right" ? `${Math.max(0, -offsetX)}px` : "auto";
+  } else if (wrapping === "Inline" && anchored) {
+    style.display = "inline-block";
+    style.verticalAlign = "middle";
+  } else if (wrapping === "BehindText" || wrapping === "InFrontOfText") {
+    style.position = "absolute";
+    style.left = `${offsetX}px`;
+    style.top = `${offsetY}px`;
+    style.zIndex = wrapping === "BehindText" ? "-1" : "1";
+  }
+  if (Number.isFinite(props.Rotation))
+    style.transform = `rotate(${props.Rotation}deg)`;
+  if (props.HorizontalAlignment === "Stretch") {
+    style.width = "100%";
+    style.cssFloat = "none";
+    style.display = "block";
+    style.clear = "both";
+  }
+  if (props.VerticalAnchor && props.VerticalAnchor !== "ParagraphTop")
+    element.dataset.rtLayoutWarning =
+      "Page/content vertical anchors are preserved in the model; browser placement uses the paragraph anchor and offsets.";
+  for (const dimension of [props.Width, props.Height])
+    if (
+      dimension &&
+      typeof dimension === "object" &&
+      dimension.FigureUnitType === "Page"
+    )
+      element.dataset.rtLayoutWarning =
+        "Page-relative FigureLength is resolved against the current containing flow area.";
 }
 
 /** Render canonical nodes with DOM APIs; markup and embedded controls are never executed. */
@@ -240,6 +434,7 @@ export function renderDocument(
   node: DocumentNode,
   owner: Document,
   previousTemplates?: Map<string, HTMLElement>,
+  window?: VirtualWindow,
 ): RenderResult {
   const result: RenderResult = {
     fragment: owner.createDocumentFragment(),
@@ -313,6 +508,10 @@ export function renderDocument(
       case "BlockUIContainer":
         tag = "div";
         break;
+      case "Figure":
+      case "Floater":
+        tag = "span";
+        break;
       case "Image":
         tag = "img";
         break;
@@ -334,6 +533,20 @@ export function renderDocument(
     element.dataset.rtId = current.id;
     element.dataset.rtType = current.type;
     applyStyle(element, props);
+    if (
+      [
+        "Figure",
+        "Floater",
+        "Image",
+        "InlineUIContainer",
+        "BlockUIContainer",
+      ].includes(current.type)
+    )
+      applyFloatingStyle(
+        element,
+        props,
+        current.type === "Figure" || current.type === "Floater",
+      );
     if (isParagraph) element.dataset.rtParagraph = "";
     if (isParagraph || current.type === "Run")
       element.style.whiteSpace = "pre-wrap";
@@ -401,6 +614,8 @@ export function renderDocument(
     } else if (
       current.type === "Image" ||
       current.type === "InlineUIContainer" ||
+      current.type === "Figure" ||
+      current.type === "Floater" ||
       isAtomicBlock
     ) {
       if (current.type === "Image") {
@@ -410,6 +625,17 @@ export function renderDocument(
         image.alt = String(props.AlternativeText || "");
         image.draggable = false;
         image.loading = "lazy";
+      } else if (current.type === "Figure" || current.type === "Floater") {
+        const story = renderDocument(
+          {
+            type: "FlowDocument",
+            id: `${current.id}-story`,
+            props: {},
+            children: current.children || [],
+          },
+          owner,
+        );
+        element.append(story.fragment);
       } else {
         element.className = "rt-embedded";
         const embedded = current.children?.find(
@@ -452,7 +678,32 @@ export function renderDocument(
   }
 
   // The control owns the document's outer surface and applies its document styles.
-  for (const child of node.children || []) visit(child, result.fragment);
+  const children = node.children || [];
+  for (let index = 0; index < children.length; index++) {
+    if (!window || window.Realized.has(index))
+      visit(children[index], result.fragment);
+    else {
+      const start = position;
+      let height = 0;
+      const first = index;
+      while (index < children.length && !window.Realized.has(index)) {
+        const block = window.Blocks[index];
+        height += block.Height;
+        position = block.EndOffset;
+        blockSeen = block.HasTextBlock;
+        index++;
+      }
+      const spacer = owner.createElement("div");
+      spacer.dataset.rtVirtualSpacer = `${first}:${index - 1}`;
+      spacer.style.height = `${height}px`;
+      spacer.style.pointerEvents = "none";
+      spacer.contentEditable = "false";
+      spacer.setAttribute("aria-hidden", "true");
+      result.positions.set(spacer, { start, end: position });
+      result.fragment.append(spacer);
+      index--;
+    }
+  }
   if (!result.fragment.childNodes.length) {
     const paragraph = owner.createElement("p");
     paragraph.dataset.rtParagraph = "";

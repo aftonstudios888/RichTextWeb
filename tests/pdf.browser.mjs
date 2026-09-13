@@ -4,8 +4,14 @@ import { readFile } from "node:fs/promises";
 /** Runs against the hosted sample, including the separately bundled optional PDF control. */
 export async function runPDFBrowserChecks(page) {
   const results = [];
-  await page.getByRole("button", { name: "File", exact: true }).click();
-  await page.locator('[data-command="pdf-tools"]').click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("button", { name: "File", exact: true })
+    .click();
+  await page
+    .locator("#word-ribbon")
+    .getByRole("button", { name: "Open PDF workspace", exact: true })
+    .click();
   await page.waitForFunction(() =>
     document
       .querySelector("rich-pdf-editor")
@@ -68,6 +74,58 @@ export async function runPDFBrowserChecks(page) {
     "PDF search navigates actual extracted text and highlights matching lines",
   );
 
+  await control.locator('[data-command="inspect-source"]').click();
+  await page.waitForFunction(
+    () => document.querySelector("rich-pdf-editor")?.SelectedTextOperator,
+  );
+  const titleId = await control.evaluate(
+    async (element) =>
+      (await element.GetTextOperators(0)).operators.find(
+        (item) => item.text === "Independent PDF source",
+      ).id,
+  );
+  await control.locator('[data-input="source-operator"]').selectOption(titleId);
+  await control
+    .locator('[data-input="source-replacement"]')
+    .fill("Browser original edit");
+  await control.locator('[data-command="replace-source"]').click();
+  await page.waitForFunction(() =>
+    document
+      .querySelector("rich-pdf-editor")
+      ?.shadowRoot.querySelector(".status")
+      ?.textContent.startsWith("Original PDF text updated"),
+  );
+  assert.equal(
+    await control.evaluate(
+      async (element) => (await element.Find("Independent PDF source")).length,
+    ),
+    0,
+  );
+  assert.equal(
+    await control.evaluate(
+      async (element) => (await element.Find("Browser original edit")).length,
+    ),
+    1,
+  );
+  assert.equal(
+    await control.evaluate(
+      async (element) =>
+        (await element.GetTextOperators(0)).operators.filter(
+          (item) => item.text === "Browser original edit",
+        ).length,
+    ),
+    1,
+  );
+  await control.locator('[data-command="undo"]').click();
+  await page.waitForFunction(async () =>
+    (
+      await document.querySelector("rich-pdf-editor").GetTextOperators(0)
+    ).operators.some((item) => item.text === "Independent PDF source"),
+  );
+  results.push(
+    "Reusable source-text picker rewrites original PDF operators and undo restores their extractable text",
+  );
+
   await control.locator('[data-input="text"]').fill("Browser overlay");
   await control.locator('[data-tool="text"]').click();
   const bounds = await control.locator(".page").boundingBox();
@@ -126,6 +184,7 @@ export async function runPDFBrowserChecks(page) {
   await page.waitForFunction(
     () => document.querySelector("rich-pdf-editor")?.ViewMode === "flow",
   );
+  assert.equal(await control.locator("rich-text-toolbar").count(), 1);
   assert.match(
     await control.evaluate((element) => element.FlowDocument.Text),
     /Łódź/,

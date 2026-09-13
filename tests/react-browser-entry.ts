@@ -2,8 +2,12 @@ import { createElement, createRef, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { FlowDocument, Paragraph, Run } from "../src/model.js";
-import { RichTextEditor, useDocumentRevision } from "../src/react.js";
-import type { RichTextBox } from "../src/control.js";
+import {
+  RichTextEditor,
+  RichTextPagedEditor,
+  useDocumentRevision,
+} from "../src/react.js";
+import type { RichTextBox, RichTextPageEditor } from "../src/control.js";
 
 const container = document.createElement("div");
 container.id = "react-fixture";
@@ -76,3 +80,93 @@ function render() {
   },
 };
 render();
+
+(window as any).richTextReactTest.mountPaged = () => {
+  const container = document.createElement("div");
+  container.id = "react-page-fixture";
+  document.body.append(container);
+  const root = createRoot(container);
+  const model = new FlowDocument();
+  for (let index = 0; index < 120; index++)
+    model.Blocks.Add(
+      new Paragraph(`React page paragraph ${index}: text for measured layout.`),
+    );
+  model.PageWidth = 450;
+  model.PageHeight = 400;
+  model.PagePadding = 35;
+  model.SetValue("ColumnCount", 2);
+  const ref = createRef<RichTextPageEditor>();
+  let mode: "page" | "continuous" = "page",
+    virtualize = true,
+    readOnly = false;
+  let ready = 0,
+    changes = 0,
+    pages = 0,
+    layouts = 0,
+    virtualEvents = 0;
+  const render = () =>
+    flushSync(() =>
+      root.render(
+        createElement(
+          StrictMode,
+          null,
+          createElement(RichTextPagedEditor, {
+            ref,
+            document: model,
+            viewMode: mode,
+            enableVirtualization: virtualize,
+            virtualizationThreshold: 10,
+            virtualizationOverscan: 2,
+            readOnly,
+            style: { height: "560px" },
+            "aria-label": "React paged document",
+            onReady: (editor) => {
+              if (!("Repaginate" in editor)) throw new Error("Wrong paged ref");
+              ready++;
+            },
+            onDocumentChange: () => {
+              changes++;
+            },
+            onPageChange: () => {
+              pages++;
+            },
+            onPaginated: () => {
+              layouts++;
+            },
+            onVirtualizationChange: () => {
+              virtualEvents++;
+            },
+          }),
+          createElement(Status, { document: model }),
+        ),
+      ),
+    );
+  (window as any).richTextReactPagedTest = {
+    get control() {
+      return ref.current;
+    },
+    get model() {
+      return model;
+    },
+    get events() {
+      return { ready, changes, pages, layouts, virtualEvents };
+    },
+    setMode(value: "page" | "continuous") {
+      mode = value;
+      render();
+    },
+    setVirtualization(value: boolean) {
+      virtualize = value;
+      render();
+    },
+    setReadOnly(value: boolean) {
+      readOnly = value;
+      render();
+    },
+    unmount() {
+      flushSync(() => root.unmount());
+      container.remove();
+    },
+  };
+  render();
+};

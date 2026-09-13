@@ -452,7 +452,7 @@ test("deleting the only row or column removes the table cleanly", () => {
     assert.equal(e.Document.Text, "");
   }
 });
-test("table editing rejects merged geometry rather than corrupting it", () => {
+test("table editing extends merged geometry and restores it on undo", () => {
   const e = new RichTextEngine(
     doc(
       node("Table", [
@@ -465,9 +465,15 @@ test("table editing rejects merged geometry rather than corrupting it", () => {
     ),
   );
   const before = e.Document.ToJSON();
-  assert.throws(() => e.InsertTableColumn(), /merged cells/);
+  e.InsertTableColumn();
+  assert.equal(
+    e.Document.ToJSON().children![0]!.children![0]!.children![0]!.children!
+      .length,
+    2,
+  );
+  assert.equal(e.CanUndo, true);
+  e.Undo();
   assert.deepEqual(e.Document.ToJSON(), before);
-  assert.equal(e.CanUndo, false);
 });
 test("annotations follow unchanged table cell identities during structure edits", () => {
   const e = new RichTextEngine(

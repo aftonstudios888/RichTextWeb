@@ -206,4 +206,109 @@ const modifiedBytes = await editor.Save();
 | `InsertPages(bytes, indices?, insertionIndex?)` | Copies selected pages from another PDF; defaults to appending all source pages         |
 | `Save()`                                        | Serializes the modified PDF to `Uint8Array`                                            |
 
-**CoverRegion is not redaction.** The original content can still be extracted, searched, copied, or recovered. Do not use it to remove secrets. True content-removing redaction is deliberately absent. Source-PDF text operators are not rewritten by the overlay editor; the optional importer provides a separate reconstructed flow for text editing and reflow. Digital signatures are not preserved as valid signatures after modification. Interactive form manipulation and PDF-native annotations are not exposed by this wrapper; highlights are drawing overlays.
+**CoverRegion is not redaction.** The original content can still be extracted, searched, copied, or recovered. Do not use it to remove secrets. True content-removing redaction is deliberately absent. Original text can be rewritten through the source-text APIs below; overlay operations continue to preserve covered content. The optional importer provides a separate reconstructed flow for semantic text editing and reflow. Digital signatures are not preserved as valid signatures after modification. Interactive form manipulation and PDF-native annotations are not exposed by this wrapper; highlights are drawing overlays.
+
+## Editing original PDF text
+
+The source editor rewrites actual text-showing operators and saves them back into
+PDF content streams. It resolves existing font resources and reuses their encoded
+glyphs. This is distinct from adding overlays or reconstructing a FlowDocument.
+The reusable `PDFEditorControl` exposes **Original text**, a source-text picker,
+replacement/removal controls, and **Replace source matches**. Double-clicking a
+visible text line selects the containing source operator. Changes participate in
+the control's undo/redo history and are immediately re-rendered and searchable.
+The reconstructed flow view now includes the reusable `RichTextToolbar` too.
+
+```ts
+const editor = await PDFEditor.Load(originalBytes);
+const inspection = await editor.GetTextOperators(0);
+const selected = inspection.operators.find((item) => item.text === "Draft")!;
+await editor.ReplaceTextOperator(0, selected.id, "Approved", {
+  expectedText: "Draft",
+  preserveAdvance: true,
+});
+const result = await editor.ReplaceSourceText("2025", "2026", {
+  caseSensitive: true,
+  all: true,
+});
+const modifiedOriginal = await editor.Save();
+```
+
+The same methods are available on `PDFEditorControl`. `InspectSourceText()`
+populates its current-page picker; `SelectTextOperator(id)` selects an inspected
+operator; `SelectedTextOperator` exposes that selection. `pdftextselectionchange`
+and `pdftextchange` events notify application/MVVM code. Source replacement respects
+`IsReadOnly`. `SourceTextReplacementOptions` configures the built-in tools.
+
+| API or option                                        | Behavior                                                                                                                                                                                     |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GetTextOperators(pageIndex?)`                       | Returns decoded operators, font/size, approximate bounds, baseline transforms, editability and diagnostics. Omitting the page inspects every page.                                           |
+| `ReplaceTextOperator(pageIndex, id, text, options?)` | Replaces one original text-showing operation. The opaque ID includes a source fingerprint; stale IDs reject. Empty replacement removes its visible glyphs.                                   |
+| `ReplaceSourceText(query, replacement, options?)`    | Replaces literal matches within each source text-showing operation. Text fragments inside one `TJ` array are searched together. Returns occurrence/operator counts and affected pages.       |
+| `preserveAdvance`                                    | Defaults to true: compensates the replacement's final advance so subsequent text operators keep their existing positions. False lets subsequent text advance naturally from the replacement. |
+| `fontBytes` / `standardFont`                         | Installs a replacement font in the correct page/Form resource scope, then restores the previous font. Use font bytes when an original embedded subset lacks the new characters.              |
+| `expectedText`                                       | Rejects if the operator's decoded source text differs from the expected value.                                                                                                               |
+| `pageIndices`, `caseSensitive`, `all`                | Restrict literal replacement; default is all pages, case-insensitive matching, and all occurrences.                                                                                          |
+| `allowPartial`                                       | Default false: whole-document replacement rejects when source text cannot be fully inspected. Explicit true skips unsupported sections.                                                      |
+
+The parser handles `Tj`, `TJ`, single-quote and double-quote text operators;
+literal/hex strings, escapes and comments; text/graphics matrices and spacing;
+multiple page content streams; nested Form XObjects; standard simple encodings,
+Encoding Differences, embedded ToUnicode maps, and horizontal Identity-H CID
+fonts. A shared Form invocation is cloned only where edited, preserving other
+occurrences. Replacement glyphs and every planned edit are checked before the
+new document is committed. Resource/encoding failure leaves the original PDF
+unchanged. Replaced content streams that are no longer reachable are removed.
+
+Preserving the final advance does not fit a long replacement into the old word's
+bounds or reflow nearby objects. Replacement text uses its natural glyph widths
+and the current spacing; original internal `TJ` kerning is regenerated for the
+changed operation. The default can therefore overlap nearby text when a longer
+replacement extends past the original area. Source text is not a semantic Word
+paragraph model, and text split across separate operators is not matched as one
+string. Use the flow importer when semantic reflow is the desired result.
+
+Source editing currently reports unsupported vertical/custom composite encodings,
+inherited ToUnicode CMaps, Type3 glyph programs, inline-image content streams and
+ActualText marked-content groups. It does not edit annotation appearance streams,
+XFA, image pixels, or outlined text. Bounds are conservative font-size rectangles,
+not exact glyph outlines. The implementation is verified against independently
+created PDFs and explicit operator/resource fixtures; this does not establish
+support for every PDF producer or font program. These APIs are content editing,
+not certified secure redaction: duplicated text, metadata, attachments and other
+representations can still contain the original information.
+
+Implementation references: [ISO 32000-1:2008, sections 7.3 and 9](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf)
+and the [pdf-lib low-level document context](https://pdf-lib.js.org/docs/api/classes/pdfdocument#context).
+
+## Anchored stories in flow-to-PDF export
+
+`toPDF` preserves Figure/Floater contents as independent anchored stories instead
+of flattening their text into the main paragraph. Main-story offsets continue to
+use one object-replacement character for each anchor. Text, images, paragraph
+styles, lists and ordinary tables in the story remain vector/selectable PDF
+content. Inline stories reserve line width; square wrapping narrows main-story
+lines beside the box and restores their width below it. Tight wrapping supports
+unrotated ellipses; rotated boxes use their enclosing bounds. TopAndBottom,
+BehindText and InFrontOfText control vertical reservation and painting order.
+
+FigureLength pixel/content/column/page units, horizontal/vertical anchors,
+offsets, padding, border/background and rotation are used by the PDF exporter.
+Anchored stories must fit on one export page; insufficient explicit heights and
+oversized stories reject rather than silently clipping or losing text. Story
+layout is measured with the selected PDF fonts, separately from browser layout.
+Complex contour wrapping, multi-page anchored stories, table row spans and exact
+Word pagination are not established by this export path.
+
+Operator IDs cover the page's resolved resources and all content streams as well
+as the selected operation; changing a font mapping or an earlier stream's text
+state invalidates them. Source edits are serialized. Concurrent requests using
+old operator IDs reject after an earlier edit commits; inspect again before
+retrying. Concurrent page/overlay changes during a staged source edit are detected
+and retained, while the conflicting source edit rejects. Prefer awaiting editing
+operations in application code. Save and inspection wait for queued source edits.
+
+Source inspection enforces terminal 64 MiB decoded-stream/page-resource limits
+and a 200,000-text-operator limit. Decoder allocation is bounded at each filter
+stage, including oversized compressed blocks; these resource errors are not
+suppressed by `allowPartial`.

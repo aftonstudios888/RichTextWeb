@@ -136,3 +136,7 @@ Create the client on the UI thread. Notifications marshal back to the captured s
 Navigation is restricted to the configured editor URL. WebView2 also checks each incoming message's source URI. Avalonia's callback lacks an equivalent source field, so its transport relies on the locked top-level document. Do not add arbitrary scripts or untrusted subframes to the privileged host page. Document imports render through the library's safe conversion path.
 
 The bridge uses UTF-16 plain-text offsets. They are not WPF `TextPointer` symbol positions. Native WPF/WinUI/Avalonia visual trees, platform-specific text services, Word's COM object model and binary document compatibility require application migration work beyond this adapter.
+
+### Avalonia Windows application manifest
+
+The consuming Avalonia Windows executable must embed a supported-OS compatibility manifest so NativeControlHost can create the layered child window used by NativeWebView. The runnable sample sets `ApplicationManifest` to [Samples/AvaloniaSmoke/app.manifest](Samples/AvaloniaSmoke/app.manifest). Include the same Windows compatibility declarations in your application's existing manifest. This is an executable setting; referencing the adapter library does not inject it into the host application.

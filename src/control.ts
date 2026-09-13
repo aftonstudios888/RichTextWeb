@@ -3,6 +3,7 @@ import { RichTextEngine, type TextSelection } from "./engine.js";
 import { fromHTML, toHTML, fromText } from "./formats.js";
 import {
   applyDocumentStyle,
+  applyEffectiveStyleValues,
   renderDocument,
   reconcileDocumentDOM,
   thicknessCSS,
@@ -16,6 +17,32 @@ import {
   type PageSettings,
 } from "./pagination.js";
 import { RichTextToolbar } from "./toolbar.js";
+import {
+  DocumentVirtualizer,
+  type VirtualWindow,
+  type VirtualizationStatistics,
+} from "./virtualization.js";
+import {
+  normalizeFloatingLayout,
+  type FloatingLayoutOptions,
+  type FloatingLayoutDiagnostic,
+} from "./floating-layout.js";
+import {
+  FloatingObjectAdorner,
+  floatingAdornerCSS,
+} from "./floating-adorner.js";
+export { DocumentVirtualizer } from "./virtualization.js";
+export { normalizeFloatingLayout } from "./floating-layout.js";
+export type {
+  VirtualizationStatistics,
+  VirtualBlock,
+  VirtualWindow,
+} from "./virtualization.js";
+export type {
+  FloatingLayoutOptions,
+  FloatingLayoutDiagnostic,
+  TextWrappingStyle,
+} from "./floating-layout.js";
 export type {
   PageLayoutResult,
   PageLayoutPage,
@@ -60,6 +87,7 @@ export class RichTextBox extends HTMLElementBase {
       "placeholder",
       "aria-label",
       "spellcheck",
+      "virtualize",
     ];
   }
   private _engine = new RichTextEngine();
@@ -79,6 +107,17 @@ export class RichTextBox extends HTMLElementBase {
   private _subscriptions: Array<{ Dispose(): void }> = [];
   private _connected = false;
   private _disposed = false;
+  private _enableVirtualization = false;
+  private _virtualizationThreshold = 200;
+  private _virtualizationOverscan = 6;
+  private _virtualizer = new DocumentVirtualizer();
+  private _virtualWindow: VirtualWindow | null = null;
+  private _virtualizationSuspended = false;
+  private _virtualFrame = 0;
+  private _virtualResizeObserver: ResizeObserver | null = null;
+  private _refreshing = false;
+  private _selectedObjectId: string | null = null;
+  protected _objectAdorner: FloatingObjectAdorner | null = null;
   private _documentSelectionChanged = (event: Event) => {
     // The public custom selectionchange event also bubbles to Document. It must
     // not be mistaken for the browser's native selection notification.
@@ -118,7 +157,7 @@ export class RichTextBox extends HTMLElementBase {
     if (typeof this.attachShadow !== "function") return;
     const shadow = this.attachShadow({ mode: "open", delegatesFocus: true });
     const style = this.ownerDocument.createElement("style");
-    style.textContent = stylesheet;
+    style.textContent = stylesheet + floatingAdornerCSS;
     const viewport = this.ownerDocument.createElement("div");
     viewport.className = "viewport";
     viewport.setAttribute("part", "viewport");
@@ -132,6 +171,11 @@ export class RichTextBox extends HTMLElementBase {
     shadow.append(style, viewport);
     this._editor = editor;
     this._viewport = viewport;
+    this._objectAdorner = new FloatingObjectAdorner(this, editor, viewport);
+    viewport.addEventListener("scroll", () => this.queueVirtualRefresh(), {
+      passive: true,
+    });
+    editor.addEventListener("load", () => this.queueVirtualRefresh(), true);
     editor.addEventListener("beforeinput", (event) =>
       this.beforeInput(event as InputEvent),
     );
@@ -140,6 +184,7 @@ export class RichTextBox extends HTMLElementBase {
     });
     editor.addEventListener("compositionstart", () => {
       this.syncSelection();
+      this.materializeNativeEditing();
       this._compositionBase = this.Document.Text;
       this._composing = true;
     });
@@ -150,6 +195,22 @@ export class RichTextBox extends HTMLElementBase {
     editor.addEventListener("keydown", (event) => this.keyDown(event));
     editor.addEventListener("keyup", () => this.syncSelection());
     editor.addEventListener("pointerup", () => this.syncSelection());
+    editor.addEventListener("pointerdown", (event) => {
+      const target = event.target as Element;
+      const object =
+        target.closest<HTMLElement>(
+          '[data-rt-type="Figure"],[data-rt-type="Floater"]',
+        ) ||
+        target.closest<HTMLElement>(
+          '[data-rt-type="Image"],[data-rt-type="InlineUIContainer"],[data-rt-type="BlockUIContainer"]',
+        );
+      this._selectedObjectId = object?.dataset.rtId || null;
+      this.emit("objectselectionchange", { elementId: this._selectedObjectId });
+    });
+    editor.addEventListener("dblclick", (event) => {
+      if (this._selectedObjectId && !this.IsReadOnly)
+        this.emit("objecteditrequest", { elementId: this._selectedObjectId });
+    });
     editor.addEventListener("focus", () => this.restoreSelection());
     editor.addEventListener("copy", (event) => this.copy(event, false));
     editor.addEventListener("cut", (event) => this.copy(event, true));
@@ -182,6 +243,12 @@ export class RichTextBox extends HTMLElementBase {
   connectedCallback(): void {
     if (this._disposed || this._connected) return;
     this._connected = true;
+    if (typeof ResizeObserver !== "undefined" && !this._virtualResizeObserver) {
+      this._virtualResizeObserver = new ResizeObserver(() =>
+        this.queueVirtualRefresh(),
+      );
+      this._virtualResizeObserver.observe(this);
+    }
     this.ownerDocument.addEventListener(
       "selectionchange",
       this._documentSelectionChanged,
@@ -192,6 +259,11 @@ export class RichTextBox extends HTMLElementBase {
 
   disconnectedCallback(): void {
     this._connected = false;
+    this._virtualResizeObserver?.disconnect();
+    this._virtualResizeObserver = null;
+    if (this._virtualFrame)
+      this.ownerDocument?.defaultView?.cancelAnimationFrame(this._virtualFrame);
+    this._virtualFrame = 0;
     this.ownerDocument?.removeEventListener(
       "selectionchange",
       this._documentSelectionChanged,
@@ -219,8 +291,12 @@ export class RichTextBox extends HTMLElementBase {
       case "view-mode":
         this._viewMode = value === "continuous" ? "continuous" : "page";
         break;
+      case "virtualize":
+        this._enableVirtualization = value !== null && value !== "false";
+        break;
     }
     this.updateAttributes();
+    if (name === "virtualize" && this._connected) this.Refresh();
   }
 
   get Document(): FlowDocument {
@@ -234,6 +310,131 @@ export class RichTextBox extends HTMLElementBase {
   }
   get Engine(): RichTextEngine {
     return this._engine;
+  }
+  get EnableVirtualization(): boolean {
+    return this._enableVirtualization;
+  }
+  set EnableVirtualization(value: boolean) {
+    this._enableVirtualization = Boolean(value);
+    this.reflectBoolean("virtualize", this._enableVirtualization);
+    this.Refresh();
+  }
+  get VirtualizationThreshold(): number {
+    return this._virtualizationThreshold;
+  }
+  set VirtualizationThreshold(value: number) {
+    if (!Number.isInteger(value) || value < 1)
+      throw new RangeError(
+        "VirtualizationThreshold must be a positive integer.",
+      );
+    this._virtualizationThreshold = value;
+    this.Refresh();
+  }
+  get VirtualizationOverscan(): number {
+    return this._virtualizationOverscan;
+  }
+  set VirtualizationOverscan(value: number) {
+    if (!Number.isInteger(value) || value < 1 || value > 100)
+      throw new RangeError(
+        "VirtualizationOverscan must be between 1 and 100 blocks.",
+      );
+    this._virtualizationOverscan = value;
+    this.Refresh();
+  }
+  get VirtualizationStatistics(): Readonly<VirtualizationStatistics> {
+    return (
+      this._virtualWindow?.Statistics || {
+        Active: false,
+        TotalBlocks: this.Document.Blocks.Count,
+        RealizedBlocks: this.Document.Blocks.Count,
+        EstimatedHeight: this._editor?.scrollHeight || 0,
+        FirstVisibleBlock: 0,
+        LastVisibleBlock: Math.max(0, this.Document.Blocks.Count - 1),
+        SelectionExpanded: false,
+      }
+    );
+  }
+  get SelectedObjectId(): string | null {
+    return this._selectedObjectId;
+  }
+  GetSelectedObject(): DocumentNode | null {
+    const nodes = new Map<string, DocumentNode>();
+    const walk = (node: DocumentNode): void => {
+      nodes.set(node.id, node);
+      node.children?.forEach(walk);
+    };
+    walk(this.Document.ToJSON());
+    const chosen = this._selectedObjectId && nodes.get(this._selectedObjectId);
+    if (chosen) return chosen;
+    const at = this.Selection.Start.Offset;
+    const leaf = this._render?.leaves.find(
+      (item) =>
+        item.atomic &&
+        at >= item.start &&
+        at <= item.end &&
+        item.node.nodeType === 1 &&
+        [
+          "Figure",
+          "Floater",
+          "Image",
+          "InlineUIContainer",
+          "BlockUIContainer",
+        ].includes((item.node as HTMLElement).dataset.rtType || ""),
+    );
+    return leaf
+      ? nodes.get((leaf.node as HTMLElement).dataset.rtId!) || null
+      : null;
+  }
+  SelectObject(elementId: string): boolean {
+    const element = Array.from(
+      this._editor?.querySelectorAll<HTMLElement>("[data-rt-id]") || [],
+    ).find((candidate) => candidate.dataset.rtId === elementId);
+    const position = element && this._render?.positions.get(element);
+    if (!position) return false;
+    this._selectedObjectId = elementId;
+    this.Select(position.start, position.end);
+    this.emit("objectselectionchange", { elementId });
+    return true;
+  }
+  SetFloatingLayout(elementId: string, options: FloatingLayoutOptions): void {
+    if (this.IsReadOnly) throw new Error("The document is read-only.");
+    const properties = normalizeFloatingLayout(options);
+    const root = this.Document.ToJSON();
+    let object: DocumentNode | undefined;
+    const walk = (node: DocumentNode): void => {
+      if (node.id === elementId) object = node;
+      else node.children?.forEach(walk);
+    };
+    walk(root);
+    if (
+      !object ||
+      ![
+        "Figure",
+        "Floater",
+        "Image",
+        "InlineUIContainer",
+        "BlockUIContainer",
+      ].includes(object.type)
+    )
+      throw new Error("Choose an image or floating text object first.");
+    this.Engine.BeginChange();
+    try {
+      for (const [name, value] of Object.entries(properties))
+        this.Engine.SetElementProperty(elementId, name, value);
+    } finally {
+      this.Engine.EndChange();
+    }
+    this._selectedObjectId = elementId;
+    this.emit("objectlayoutchange", { elementId, properties });
+  }
+  get FloatingLayoutDiagnostics(): FloatingLayoutDiagnostic[] {
+    return Array.from(
+      this._editor?.querySelectorAll<HTMLElement>("[data-rt-layout-warning]") ||
+        [],
+    ).map((element) => ({
+      ElementId: element.dataset.rtId || "",
+      Message: element.dataset.rtLayoutWarning!,
+    }));
   }
   get Selection(): TextSelection {
     return this._engine.Selection;
@@ -383,6 +584,106 @@ export class RichTextBox extends HTMLElementBase {
   ScrollToEnd(): void {
     if (this._viewport) this._viewport.scrollTop = this._viewport.scrollHeight;
   }
+  ScrollToTextOffset(offset: number): void {
+    if (
+      !Number.isInteger(offset) ||
+      offset < 0 ||
+      offset > this.Document.Text.length
+    )
+      throw new RangeError("Text offset is outside the document.");
+    this.Select(offset);
+    if (this._virtualWindow && this._viewport) {
+      const block = this._virtualizer.BlockAtOffset(offset);
+      if (block) this._viewport.scrollTop = block.Top * this.Zoom;
+      this.Refresh();
+    }
+    const point = this.domPoint(offset);
+    const element =
+      point?.node.nodeType === 1
+        ? (point.node as HTMLElement)
+        : point?.node.parentElement;
+    element?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  async Copy(): Promise<void> {
+    this.syncSelection();
+    if (this.Selection.IsEmpty) return;
+    const clipboard = this.ownerDocument?.defaultView?.navigator.clipboard;
+    if (!clipboard)
+      throw new Error(
+        "Clipboard access requires a secure browser context and permission.",
+      );
+    const html = toHTML(this.Engine.GetSelectedFragment()),
+      text = this.Selection.Text;
+    if (typeof ClipboardItem !== "undefined" && clipboard.write)
+      await clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+    else if (clipboard.writeText) await clipboard.writeText(text);
+    else throw new Error("This browser cannot write the system clipboard.");
+  }
+  async Cut(): Promise<void> {
+    if (this.IsReadOnly) return;
+    this.syncSelection();
+    const revision = this.Document.Revision,
+      document = this.Document,
+      start = this.Selection.Start.Offset,
+      end = this.Selection.End.Offset;
+    await this.Copy();
+    if (
+      this.IsReadOnly ||
+      this.Document !== document ||
+      this.Document.Revision !== revision ||
+      this.Selection.Start.Offset !== start ||
+      this.Selection.End.Offset !== end
+    )
+      throw new Error(
+        "The document or selection changed while copying; no content was cut.",
+      );
+    if (start !== end) this.Engine.InsertText("");
+  }
+  async Paste(): Promise<void> {
+    if (this.IsReadOnly) return;
+    const clipboard = this.ownerDocument?.defaultView?.navigator.clipboard;
+    if (!clipboard)
+      throw new Error(
+        "Clipboard access requires a secure browser context and permission.",
+      );
+    this.syncSelection();
+    const revision = this.Document.Revision,
+      document = this.Document,
+      start = this.Selection.Start.Offset,
+      end = this.Selection.End.Offset;
+    let html = "",
+      text = "";
+    if (clipboard.read) {
+      const items = await clipboard.read();
+      for (const item of items) {
+        if (item.types.includes("text/html"))
+          html = await (await item.getType("text/html")).text();
+        if (item.types.includes("text/plain"))
+          text = await (await item.getType("text/plain")).text();
+        if (html || text) break;
+      }
+    } else if (clipboard.readText) text = await clipboard.readText();
+    else throw new Error("This browser cannot read the system clipboard.");
+    if (
+      this.IsReadOnly ||
+      this.Document !== document ||
+      this.Document.Revision !== revision ||
+      this.Selection.Start.Offset !== start ||
+      this.Selection.End.Offset !== end
+    )
+      throw new Error(
+        "The document or selection changed while reading the clipboard; paste was cancelled.",
+      );
+    if (html) this.PasteHTML(html);
+    else if (text) this.Engine.InsertText(text);
+    this.restoreSelection();
+  }
 
   Execute(command: string, parameter?: any): unknown {
     const name = command.replace(
@@ -390,6 +691,14 @@ export class RichTextBox extends HTMLElementBase {
       "",
     );
     const normalized = name.replace(/[\s_-]/g, "").toLowerCase();
+    if (normalized === "copy") return this.Copy();
+    if (normalized === "cut") return this.Cut();
+    if (normalized === "paste") return this.Paste();
+    if (normalized === "setfloatinglayout")
+      return this.SetFloatingLayout(
+        parameter.elementId ?? parameter.ElementId,
+        parameter.options ?? parameter.Options,
+      );
     if (normalized === "selectall") {
       this.SelectAll();
       return;
@@ -414,40 +723,129 @@ export class RichTextBox extends HTMLElementBase {
   }
 
   Refresh(): void {
-    if (!this._editor || this._composing || this._suspendRender) return;
-    const hadFocus = this.shadowRoot?.activeElement === this._editor;
-    const scrollTop = this._viewport?.scrollTop || 0;
-    const scrollLeft = this._viewport?.scrollLeft || 0;
-    const json = this.Document.ToJSON();
-    this._render = reconcileDocumentDOM(
-      this._editor,
-      renderDocument(json, this.ownerDocument, this._render?.templates),
-    );
-    applyDocumentStyle(this._editor, json.props || {});
-    const props = json.props || {};
-    if (Number.isFinite(Number(props.PageWidth)) && Number(props.PageWidth) > 0)
-      this._editor.style.setProperty(
-        "--rt-page-width",
-        `${Number(props.PageWidth)}px`,
-      );
     if (
-      Number.isFinite(Number(props.PageHeight)) &&
-      Number(props.PageHeight) > 0
+      !this._editor ||
+      this._composing ||
+      this._suspendRender ||
+      this._refreshing
     )
-      this._editor.style.setProperty(
-        "--rt-page-height",
-        `${Number(props.PageHeight)}px`,
+      return;
+    this._refreshing = true;
+    try {
+      const hadFocus = this.shadowRoot?.activeElement === this._editor;
+      const scrollTop = this._viewport?.scrollTop || 0;
+      const scrollLeft = this._viewport?.scrollLeft || 0;
+      const json = this.Document.ToJSON();
+      this._virtualWindow = null;
+      if (
+        this._enableVirtualization &&
+        this.ViewMode === "continuous" &&
+        !this._virtualizationSuspended &&
+        (json.children?.length || 0) >= this.VirtualizationThreshold
+      ) {
+        this._virtualizer.Index(
+          json,
+          (this._editor.clientWidth || this.clientWidth || 794) - 48,
+        );
+        this._virtualWindow = this._virtualizer.Window(
+          scrollTop / this.Zoom,
+          (this._viewport?.clientHeight || 600) / this.Zoom,
+          this.VirtualizationOverscan,
+          {
+            Start: this.Selection.Start.Offset,
+            End: this.Selection.End.Offset,
+          },
+        );
+      }
+      applyEffectiveStyleValues(
+        json,
+        this.Document,
+        this._virtualWindow || undefined,
       );
-    const padding = thicknessCSS(props.PagePadding);
-    if (padding) this._editor.style.setProperty("--rt-page-padding", padding);
-    this._editor.dataset.empty = this.Document.Text.length ? "false" : "true";
-    this.updateAttributes();
-    this._lastDOMHTML = this._editor.innerHTML;
-    if (hadFocus) this.restoreSelection();
-    if (this._viewport) {
-      this._viewport.scrollTop = scrollTop;
-      this._viewport.scrollLeft = scrollLeft;
+      this._render = reconcileDocumentDOM(
+        this._editor,
+        renderDocument(
+          json,
+          this.ownerDocument,
+          this._render?.templates,
+          this._virtualWindow || undefined,
+        ),
+      );
+      applyDocumentStyle(this._editor, json.props || {});
+      const props = json.props || {};
+      if (
+        Number.isFinite(Number(props.PageWidth)) &&
+        Number(props.PageWidth) > 0
+      )
+        this._editor.style.setProperty(
+          "--rt-page-width",
+          `${Number(props.PageWidth)}px`,
+        );
+      if (
+        Number.isFinite(Number(props.PageHeight)) &&
+        Number(props.PageHeight) > 0
+      )
+        this._editor.style.setProperty(
+          "--rt-page-height",
+          `${Number(props.PageHeight)}px`,
+        );
+      const padding = thicknessCSS(props.PagePadding);
+      if (padding) this._editor.style.setProperty("--rt-page-padding", padding);
+      this._editor.dataset.empty = this.Document.Text.length ? "false" : "true";
+      this.updateAttributes();
+      this._lastDOMHTML = this._editor.innerHTML;
+      if (hadFocus) this.restoreSelection();
+      if (this._viewport) {
+        this._viewport.scrollTop = scrollTop;
+        this._viewport.scrollLeft = scrollLeft;
+      }
+      if (this._virtualWindow) {
+        let measured = false;
+        for (const element of Array.from(
+          this._editor.children,
+        ) as HTMLElement[]) {
+          if (!element.dataset.rtId) continue;
+          const style =
+            this.ownerDocument.defaultView!.getComputedStyle(element);
+          measured =
+            this._virtualizer.SetMeasuredHeight(
+              element.dataset.rtId,
+              element.getBoundingClientRect().height / this.Zoom +
+                (parseFloat(style.marginTop) || 0) +
+                (parseFloat(style.marginBottom) || 0),
+            ) || measured;
+        }
+        if (measured) this.queueVirtualRefresh();
+        this.emit("virtualizationchange", {
+          statistics: this.VirtualizationStatistics,
+        });
+      }
+      this._objectAdorner?.Refresh();
+    } finally {
+      this._refreshing = false;
     }
+  }
+
+  private queueVirtualRefresh(): void {
+    if (
+      !this._enableVirtualization ||
+      this._virtualFrame ||
+      this._composing ||
+      this._virtualizationSuspended ||
+      !this.isConnected
+    )
+      return;
+    this._virtualFrame = this.ownerDocument.defaultView!.requestAnimationFrame(
+      () => {
+        this._virtualFrame = 0;
+        this.Refresh();
+      },
+    );
+  }
+  private materializeNativeEditing(): void {
+    if (!this._virtualWindow) return;
+    this._virtualizationSuspended = true;
+    this.Refresh();
   }
 
   get RenderStatistics(): Readonly<RenderStatistics> {
@@ -486,6 +884,9 @@ export class RichTextBox extends HTMLElementBase {
   }
 
   Dispose(): void {
+    this._objectAdorner?.Dispose();
+    if (this._virtualFrame)
+      this.ownerDocument?.defaultView?.cancelAnimationFrame(this._virtualFrame);
     this.disconnectedCallback();
     for (const subscription of this._subscriptions.splice(0))
       subscription.Dispose();
@@ -500,7 +901,12 @@ export class RichTextBox extends HTMLElementBase {
   protected emit(name: string, detail: unknown): void {
     if (typeof CustomEvent !== "undefined")
       this.dispatchEvent(
-        new CustomEvent(name, { detail, bubbles: true, composed: true }),
+        new CustomEvent(name, {
+          detail,
+          bubbles: true,
+          composed: true,
+          cancelable: name === "objecteditrequest",
+        }),
       );
   }
   private emitCommandState(): void {
@@ -667,6 +1073,24 @@ export class RichTextBox extends HTMLElementBase {
       this.shadowRoot?.activeElement !== this._editor
     )
       return;
+    if (this._virtualWindow && !this._refreshing) {
+      const start = this._virtualizer.BlockAtOffset(
+        this.Selection.Start.Offset,
+      )?.Index;
+      const end = this._virtualizer.BlockAtOffset(
+        this.Selection.End.Offset,
+      )?.Index;
+      if (
+        (start !== undefined && !this._virtualWindow.Realized.has(start)) ||
+        (end !== undefined && !this._virtualWindow.Realized.has(end)) ||
+        (start !== undefined &&
+          end !== undefined &&
+          Array.from({ length: end - start + 1 }, (_, i) => start + i).some(
+            (index) => !this._virtualWindow!.Realized.has(index),
+          ))
+      )
+        this.Refresh();
+    }
     const selection = this.nativeSelection();
     const start = this.domPoint(this.Selection.Start.Offset),
       end = this.domPoint(this.Selection.End.Offset);
@@ -697,6 +1121,7 @@ export class RichTextBox extends HTMLElementBase {
       event.preventDefault();
       return;
     }
+    if (!event.cancelable && !this._composing) this.materializeNativeEditing();
     if (
       this._composing ||
       event.isComposing ||
@@ -779,7 +1204,7 @@ export class RichTextBox extends HTMLElementBase {
     if (handled) {
       event.preventDefault();
       this.restoreSelection();
-    }
+    } else this.materializeNativeEditing();
   }
 
   private deleteWord(direction: number): void {
@@ -932,9 +1357,21 @@ export class RichTextBox extends HTMLElementBase {
     if (!this._editor || this._composing) return;
     if (this._editor.innerHTML === this._lastDOMHTML) {
       this._compositionBase = null;
+      if (this._virtualizationSuspended) {
+        this._virtualizationSuspended = false;
+        this.Refresh();
+      }
       return;
     }
     if (this.IsReadOnly) {
+      this.Refresh();
+      return;
+    }
+    if (this._virtualWindow) {
+      this.emit("nativeinputconflict", {
+        reason:
+          "A native input arrived without beforeinput in a virtualized surface; the authoritative document was preserved.",
+      });
       this.Refresh();
       return;
     }
@@ -943,6 +1380,7 @@ export class RichTextBox extends HTMLElementBase {
       ? this.nativeTextOffset(native.endContainer, native.endOffset)
       : this.Selection.End.Offset;
     const content = this._editor.cloneNode(true) as HTMLDivElement;
+    const preservedAtoms = this.preserveNativeAtoms(content);
     content
       .querySelectorAll("[data-rt-placeholder]")
       .forEach((node) => node.remove());
@@ -1011,6 +1449,27 @@ export class RichTextBox extends HTMLElementBase {
       } else {
         // Other native editing may change formatting: retain document-level metadata.
         const node: DocumentNode = replacement.ToJSON();
+        const restoreAtoms = (current: DocumentNode): DocumentNode => {
+          if (
+            current.type === "Paragraph" &&
+            current.children?.length === 1 &&
+            current.children[0].type === "Image"
+          ) {
+            const block = preservedAtoms.get(
+              String(current.children[0].props.AlternativeText),
+            );
+            if (block?.type === "BlockUIContainer")
+              return structuredClone(block);
+          }
+          const original =
+            current.type === "Image" &&
+            preservedAtoms.get(String(current.props.AlternativeText));
+          if (original) return structuredClone(original);
+          if (current.children)
+            current.children = current.children.map(restoreAtoms);
+          return current;
+        };
+        restoreAtoms(node);
         node.props = { ...this.Document.ToJSON().props };
         this._engine.ReplaceDocument(FlowDocument.FromJSON(node));
         this._engine.Select(
@@ -1020,6 +1479,7 @@ export class RichTextBox extends HTMLElementBase {
       }
     } finally {
       this._suspendRender = false;
+      this._virtualizationSuspended = false;
     }
     this.Refresh();
     this.restoreSelection();
@@ -1038,6 +1498,7 @@ export class RichTextBox extends HTMLElementBase {
     }
     const wrapper = this.ownerDocument.createElement("div");
     wrapper.append(range.cloneContents());
+    this.preserveNativeAtoms(wrapper);
     wrapper
       .querySelectorAll("[data-rt-placeholder]")
       .forEach((node) => node.remove());
@@ -1045,6 +1506,39 @@ export class RichTextBox extends HTMLElementBase {
       (node as HTMLElement).style.whiteSpace = "pre-wrap";
     });
     return fromHTML(wrapper.innerHTML).Text.length;
+  }
+
+  private preserveNativeAtoms(
+    container: HTMLElement,
+  ): Map<string, DocumentNode> {
+    const originals = new Map<string, DocumentNode>();
+    const walk = (node: DocumentNode): void => {
+      originals.set(node.id, node);
+      node.children?.forEach(walk);
+    };
+    walk(this.Document.ToJSON());
+    const preserved = new Map<string, DocumentNode>();
+    for (const element of Array.from(
+      container.querySelectorAll<HTMLElement>(
+        '[data-rt-type="Figure"],[data-rt-type="Floater"],[data-rt-type="Image"],[data-rt-type="InlineUIContainer"],[data-rt-type="BlockUIContainer"]',
+      ),
+    )) {
+      if (!container.contains(element)) continue;
+      const original = originals.get(element.dataset.rtId || "");
+      if (!original) continue;
+      const key = `rtw-native-object:${original.id}`;
+      preserved.set(key, original);
+      const placeholder = this.ownerDocument.createElement("img");
+      placeholder.src =
+        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+      placeholder.alt = key;
+      if (original.type === "BlockUIContainer") {
+        const paragraph = this.ownerDocument.createElement("p");
+        paragraph.append(placeholder);
+        element.replaceWith(paragraph);
+      } else element.replaceWith(placeholder);
+    }
+    return preserved;
   }
 }
 
@@ -1162,6 +1656,7 @@ export class FlowDocumentPageViewer extends FlowDocumentReader {
   ): void {
     super.attributeChangedCallback(name, oldValue, value);
     if (name === "zoom") this.configurePagination();
+    if (name === "view-mode" && this.isConnected) this.Refresh();
   }
   get PageCount(): number {
     return this._layout?.PageCount || 1;
@@ -1227,6 +1722,10 @@ export class FlowDocumentPageViewer extends FlowDocumentReader {
   }
   /** Wait for font layout and measure real column fragments in the screen viewer. */
   Repaginate(): Promise<PageLayoutResult> {
+    if (this.ViewMode === "continuous")
+      return Promise.reject(
+        new Error("Screen pagination requires page view mode."),
+      );
     if (this._layoutPending) return this._layoutPending;
     if (
       !this.isConnected ||
@@ -1291,16 +1790,36 @@ export class FlowDocumentPageViewer extends FlowDocumentReader {
       this._pageDisposed ||
       !this.isConnected ||
       !this._editor ||
-      !this._render
+      !this._render ||
+      this.ViewMode === "continuous"
     )
       return;
     void this.Repaginate().catch((error) => {
       if (!this._pageDisposed) this.emit("paginationerror", { error });
     });
   }
-  private configurePagination(): void {
+  protected configurePagination(): void {
     if (!this._editor || !this._sheet || !this._pageWindow) return;
+    if (this.ViewMode === "continuous") {
+      this._sheet.style.display = "contents";
+      this._pageWindow.style.display = "contents";
+      this._editor.classList.remove("rt-page-flow");
+      this._viewport?.classList.add("continuous");
+      for (const element of [
+        this._header,
+        this._footer,
+        this._footnotes,
+        this.shadowRoot?.querySelector<HTMLElement>(".rt-page-nav"),
+      ])
+        if (element) element.style.display = "none";
+      return;
+    }
+    this._sheet.style.display = "";
+    this._pageWindow.style.display = "";
+    const nav = this.shadowRoot?.querySelector<HTMLElement>(".rt-page-nav");
+    if (nav) nav.style.display = "flex";
     const json = this.Document.ToJSON();
+    applyEffectiveStyleValues(json, this.Document, undefined, false);
     this._paginationDocument = json;
     this._settings = pageSettings(json.props || {});
     const s = this._settings,
@@ -1316,9 +1835,9 @@ export class FlowDocumentPageViewer extends FlowDocumentReader {
     this._pageWindow.style.height = `${s.ContentHeight}px`;
     flow.width = `${s.ContentWidth}px`;
     flow.height = `${s.ContentHeight}px`;
-    flow.columnWidth = `${s.ContentWidth}px`;
+    flow.columnWidth = `${s.TextColumnWidth}px`;
     flow.columnGap = `${s.ColumnGap}px`;
-    flow.columnCount = "auto";
+    flow.columnCount = String(s.ColumnCount);
     flow.columnFill = "auto";
     const model = new Map<string, DocumentNode>();
     const visit = (node: DocumentNode) => {
@@ -1332,14 +1851,18 @@ export class FlowDocumentPageViewer extends FlowDocumentReader {
       .forEach((element) => {
         this._elementsById.set(element.dataset.rtId!, element);
         const props = model.get(element.dataset.rtId!)?.props || {};
-        if (props.BreakPageBefore) element.style.breakBefore = "column";
-        if (props.KeepTogether) element.style.breakInside = "avoid-column";
-        if (props.KeepWithNext) element.style.breakAfter = "avoid-column";
+        if (props.BreakPageBefore || element.style.breakBefore === "page")
+          element.style.breakBefore = "column";
+        if (props.KeepTogether || element.style.breakInside === "avoid")
+          element.style.breakInside = "avoid-column";
+        if (props.KeepWithNext || element.style.breakAfter === "avoid")
+          element.style.breakAfter = "avoid-column";
       });
     this.updatePageView();
   }
   private updatePageView(): void {
     if (!this._editor || !this._sheet) return;
+    if (this.ViewMode === "continuous") return;
     const s = this._settings;
     const rtl =
       this.ownerDocument.defaultView?.getComputedStyle(this._editor)
@@ -1355,6 +1878,7 @@ export class FlowDocumentPageViewer extends FlowDocumentReader {
       this._previousButton.disabled = !this.CanGoToPreviousPage;
     if (this._nextButton) this._nextButton.disabled = !this.CanGoToNextPage;
     this.renderStories();
+    this._objectAdorner?.Refresh();
   }
   private renderStories(): void {
     if (!this._header || !this._footer || !this._footnotes) return;
@@ -1496,6 +2020,62 @@ export class FlowDocumentPageViewer extends FlowDocumentReader {
   }
 }
 
+/** Finite screen pages and ordinary model editing share the same control implementation. */
+export class RichTextPageEditor extends FlowDocumentPageViewer {
+  private _followingCaret = false;
+  constructor() {
+    super();
+    this.IsReadOnly = false;
+    const follow = () => {
+      if (this.ViewMode !== "page" || this._followingCaret || !this.isConnected)
+        return;
+      void this.Repaginate()
+        .then((layout) => {
+          if (this.ViewMode !== "page" || !this.isConnected) return;
+          const offset = this.Selection.End.Offset;
+          const page = layout.Pages.find(
+            (item, index) =>
+              offset >= item.StartOffset &&
+              (offset < item.EndOffset || index === layout.Pages.length - 1),
+          );
+          if (page && page.PageNumber !== this.PageNumber) {
+            this._followingCaret = true;
+            try {
+              super.GoToPage(page.PageNumber);
+            } finally {
+              this._followingCaret = false;
+            }
+          }
+        })
+        .catch(() => {});
+    };
+    this.addEventListener("selectionchange", follow);
+    this.addEventListener("documentchange", follow);
+  }
+  override connectedCallback(): void {
+    const readOnly =
+      this.hasAttribute("readonly") &&
+      this.getAttribute("readonly") !== "false";
+    super.connectedCallback();
+    this.IsReadOnly = readOnly;
+  }
+  override GoToPage(number: number): boolean {
+    const result = super.GoToPage(number);
+    if (result && !this._followingCaret && !this.IsReadOnly) {
+      const page = this.LayoutResult?.Pages[number - 1];
+      if (page) {
+        this._followingCaret = true;
+        try {
+          this.Select(page.StartOffset);
+        } finally {
+          this._followingCaret = false;
+        }
+      }
+    }
+    return result;
+  }
+}
+
 /** Explicit and idempotent registration; safe to import during server rendering. */
 export function registerRichTextWeb(
   registry: CustomElementRegistry | undefined = globalThis.customElements,
@@ -1507,6 +2087,7 @@ export function registerRichTextWeb(
     ["flow-document-scroll-viewer", FlowDocumentScrollViewer],
     ["flow-document-page-viewer", FlowDocumentPageViewer],
     ["rich-text-toolbar", RichTextToolbar],
+    ["rich-text-page-editor", RichTextPageEditor],
   ];
   for (const [name, constructor] of controls)
     if (!registry.get(name)) registry.define(name, constructor);
@@ -1519,5 +2100,6 @@ declare global {
     "flow-document-scroll-viewer": FlowDocumentScrollViewer;
     "flow-document-page-viewer": FlowDocumentPageViewer;
     "rich-text-toolbar": RichTextToolbar;
+    "rich-text-page-editor": RichTextPageEditor;
   }
 }
