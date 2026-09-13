@@ -1,0 +1,9 @@
+node_modules/
+dist/
+site/
+.test-build/
+.release/
+*.tgz
+*.log
+test-results/
+playwright-report/

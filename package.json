@@ -1,0 +1,133 @@
+{
+  "name": "@wieslawsoltes/richtextweb",
+  "version": "0.1.0",
+  "description": "Reusable rich text engine, flow documents, web components and .NET-style MVVM APIs for JavaScript and React",
+  "type": "module",
+  "license": "MIT",
+  "author": "RichTextWeb contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wieslawsoltes/RichTextWeb.git"
+  },
+  "homepage": "https://wieslawsoltes.github.io/RichTextWeb/",
+  "bugs": "https://github.com/wieslawsoltes/RichTextWeb/issues",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "unpkg": "./dist/richtextweb.global.js",
+  "jsdelivr": "./dist/richtextweb.global.js",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./core": {
+      "types": "./dist/types/core.d.ts",
+      "import": "./dist/esm/core.js",
+      "require": "./dist/cjs/core.js"
+    },
+    "./web": {
+      "types": "./dist/types/control.d.ts",
+      "import": "./dist/esm/control.js",
+      "require": "./dist/cjs/control.js"
+    },
+    "./react": {
+      "types": "./dist/types/react.d.ts",
+      "import": "./dist/esm/react.js",
+      "require": "./dist/cjs/react.js"
+    },
+    "./mvvm": {
+      "types": "./dist/types/mvvm.d.ts",
+      "import": "./dist/esm/mvvm.js",
+      "require": "./dist/cjs/mvvm.js"
+    },
+    "./formats": {
+      "types": "./dist/types/formats.d.ts",
+      "import": "./dist/esm/formats.js",
+      "require": "./dist/cjs/formats.js"
+    },
+    "./bridge": {
+      "types": "./dist/types/bridge.d.ts",
+      "import": "./dist/esm/bridge.js",
+      "require": "./dist/cjs/bridge.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "docs",
+    "adapters",
+    "sample",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": [
+    "./dist/esm/control.js",
+    "./dist/esm/index.js",
+    "./dist/cjs/control.js",
+    "./dist/cjs/index.js"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "rich-text",
+    "flowdocument",
+    "richtextbox",
+    "wpf",
+    "winui",
+    "avalonia",
+    "mvvm",
+    "web-components",
+    "react",
+    "markdown",
+    "docx",
+    "pdf"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
+    "test:browser": "node scripts/browser-test.mjs",
+    "test:package": "node scripts/package-test.mjs",
+    "build:demo": "node scripts/build-demo.mjs",
+    "dev": "node scripts/serve.mjs",
+    "check": "npm run build && npm test && npm run build:demo && npm run test:package",
+    "benchmark": "node scripts/benchmark.mjs",
+    "prepack": "npm run build",
+    "format": "prettier --write \"{src,sample,scripts,tests,docs,adapters,web,.github}/**/*.{ts,js,mjs,css,html,json,yml,yaml,md}\" \"*.{json,md}\"",
+    "format:check": "prettier --check \"{src,sample,scripts,tests,docs,adapters,web,.github}/**/*.{ts,js,mjs,css,html,json,yml,yaml,md}\" \"*.{json,md}\""
+  },
+  "dependencies": {
+    "@pdf-lib/fontkit": "1.1.1",
+    "jszip": "3.10.1",
+    "marked": "17.0.5",
+    "pdf-lib": "1.17.1"
+  },
+  "peerDependencies": {
+    "react": "^18.3.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "esbuild": "0.28.0",
+    "playwright": "1.62.1",
+    "prettier": "3.9.6",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "typescript": "5.9.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

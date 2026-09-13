@@ -1,0 +1,355 @@
+import type { DocumentNode } from "./model.js";
+
+/** DOM positions are UTF-16 text offsets, including paragraph separators. */
+export interface DOMPosition {
+  start: number;
+  end: number;
+}
+export interface RenderResult {
+  fragment: DocumentFragment;
+  positions: WeakMap<Node, DOMPosition>;
+  leaves: Array<{ node: Node; start: number; end: number; atomic?: boolean }>;
+  paragraphs: Array<{ node: HTMLElement; start: number; end: number }>;
+  length: number;
+}
+
+export function safeNavigationUri(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const uri = value.trim();
+  if (!uri || /[\u0000-\u0020\u007f]/.test(uri)) return undefined;
+  if (/^(https?:|mailto:|tel:)/i.test(uri) || /^(#|\/|\.\.?\/)/.test(uri))
+    return uri;
+  if (!/^[a-z][a-z\d+.-]*:/i.test(uri)) return uri;
+  return undefined;
+}
+
+export function safeImageSource(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const uri = value.trim();
+  if (
+    /^data:image\/(?:png|jpeg|gif|webp|avif);base64,[a-z\d+/=\s]+$/i.test(uri)
+  )
+    return uri;
+  if (/^(https?:\/\/|blob:)/i.test(uri) && !/[\u0000-\u0020\u007f]/.test(uri))
+    return uri;
+  if (/^(\/|\.\.?\/)/.test(uri) && !/[\u0000-\u0020\u007f]/.test(uri))
+    return uri;
+  return undefined;
+}
+
+function cssLength(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return `${value}px`;
+  if (
+    typeof value === "string" &&
+    /^-?\d+(?:\.\d+)?(?:px|pt|em|rem|%)?$/.test(value)
+  )
+    return /^-?\d+(?:\.\d+)?$/.test(value) ? `${value}px` : value;
+  return undefined;
+}
+
+export function thicknessCSS(value: unknown): string | undefined {
+  const scalar = cssLength(value);
+  if (scalar) return scalar;
+  if (value && typeof value === "object") {
+    const t = value as Record<string, unknown>;
+    const parts = [
+      t.Top ?? t.top,
+      t.Right ?? t.right,
+      t.Bottom ?? t.bottom,
+      t.Left ?? t.left,
+    ].map(cssLength);
+    if (parts.every(Boolean)) return parts.join(" ");
+  }
+  if (typeof value === "string") {
+    const parts = value
+      .trim()
+      .split(/[\s,]+/)
+      .map(cssLength);
+    if (parts.length > 0 && parts.length <= 4 && parts.every(Boolean))
+      return parts.join(" ");
+  }
+  return undefined;
+}
+
+function applyStyle(element: HTMLElement, props: Record<string, any>): void {
+  const s = element.style;
+  // Each value goes through a single CSS property setter, never through cssText.
+  if (props.FontFamily) s.fontFamily = String(props.FontFamily);
+  const fontSize = cssLength(props.FontSize);
+  if (fontSize) s.fontSize = fontSize;
+  if (props.FontWeight) s.fontWeight = String(props.FontWeight).toLowerCase();
+  if (props.FontStyle) s.fontStyle = String(props.FontStyle).toLowerCase();
+  if (props.Foreground) s.color = String(props.Foreground);
+  if (props.Background) s.backgroundColor = String(props.Background);
+  if (props.TextDecorations) {
+    const decoration = String(props.TextDecorations)
+      .replace(/Strikethrough/gi, "line-through")
+      .toLowerCase();
+    if (
+      /^(none|underline|line-through|overline)( (underline|line-through|overline))*$/.test(
+        decoration,
+      )
+    )
+      s.textDecoration = decoration;
+  }
+  const alignment = String(props.TextAlignment ?? "").toLowerCase();
+  if (
+    ["left", "center", "right", "justify", "start", "end"].includes(alignment)
+  )
+    s.textAlign = alignment;
+  if (props.FlowDirection === "RightToLeft") element.dir = "rtl";
+  if (props.FlowDirection === "LeftToRight") element.dir = "ltr";
+  const margin = thicknessCSS(props.Margin);
+  if (margin) s.margin = margin;
+  const padding = thicknessCSS(props.Padding);
+  if (padding) s.padding = padding;
+  const lineHeight = cssLength(props.LineHeight);
+  if (lineHeight) s.lineHeight = lineHeight;
+  const textIndent = cssLength(props.TextIndent);
+  if (textIndent) s.textIndent = textIndent;
+  const width = cssLength(props.Width);
+  if (width) s.width = width;
+  const height = cssLength(props.Height);
+  if (height) s.height = height;
+  if (props.BreakPageBefore) s.breakBefore = "page";
+  if (props.KeepTogether) s.breakInside = "avoid";
+  if (props.KeepWithNext) s.breakAfter = "avoid";
+  if (props.BaselineAlignment === "Superscript") s.verticalAlign = "super";
+  if (props.BaselineAlignment === "Subscript") s.verticalAlign = "sub";
+  if (props.BorderBrush) s.borderColor = String(props.BorderBrush);
+  const border = thicknessCSS(props.BorderThickness);
+  if (border) {
+    s.borderWidth = border;
+    s.borderStyle = "solid";
+  }
+  if (typeof props.Language === "string") element.lang = props.Language;
+}
+
+/** Render canonical nodes with DOM APIs; markup and embedded controls are never executed. */
+export function renderDocument(
+  node: DocumentNode,
+  owner: Document,
+): RenderResult {
+  const result: RenderResult = {
+    fragment: owner.createDocumentFragment(),
+    positions: new WeakMap(),
+    leaves: [],
+    paragraphs: [],
+    length: 0,
+  };
+  let position = 0;
+  let blockSeen = false;
+
+  function visit(current: DocumentNode, parent: Node): void {
+    const props = current.props || {};
+    const isParagraph = current.type === "Paragraph";
+    const isAtomicBlock = current.type === "BlockUIContainer";
+    if (isParagraph || isAtomicBlock) {
+      if (blockSeen) position++;
+      blockSeen = true;
+    }
+    const start = position;
+    let tag = "span";
+    switch (current.type) {
+      case "FlowDocument":
+      case "Section":
+        tag = "section";
+        break;
+      case "Paragraph":
+        tag =
+          Number(props.HeadingLevel) >= 1 && Number(props.HeadingLevel) <= 6
+            ? `h${Number(props.HeadingLevel)}`
+            : "p";
+        break;
+      case "Bold":
+        tag = "strong";
+        break;
+      case "Italic":
+        tag = "em";
+        break;
+      case "Underline":
+        tag = "u";
+        break;
+      case "Hyperlink":
+        tag = "a";
+        break;
+      case "LineBreak":
+        tag = "br";
+        break;
+      case "List":
+        tag = /decimal|latin|roman|number/i.test(
+          String(props.MarkerStyle || ""),
+        )
+          ? "ol"
+          : "ul";
+        break;
+      case "ListItem":
+        tag = "li";
+        break;
+      case "Table":
+        tag = "table";
+        break;
+      case "TableRowGroup":
+        tag = props.IsHeader ? "thead" : "tbody";
+        break;
+      case "TableRow":
+        tag = "tr";
+        break;
+      case "TableCell":
+        tag = props.IsHeader ? "th" : "td";
+        break;
+      case "BlockUIContainer":
+        tag = "div";
+        break;
+      case "Image":
+        tag = "img";
+        break;
+    }
+    const element = owner.createElement(tag);
+    element.dataset.rtId = current.id;
+    element.dataset.rtType = current.type;
+    applyStyle(element, props);
+    if (isParagraph) element.dataset.rtParagraph = "";
+    if (isParagraph || current.type === "Run")
+      element.style.whiteSpace = "pre-wrap";
+    if (current.type === "Hyperlink") {
+      const uri = safeNavigationUri(props.NavigateUri);
+      if (uri) (element as HTMLAnchorElement).href = uri;
+      (element as HTMLAnchorElement).rel = "noopener noreferrer";
+      if (props.ToolTip) element.title = String(props.ToolTip);
+    }
+    if (current.type === "List") {
+      if (tag === "ol" && Number.isInteger(Number(props.StartIndex)))
+        (element as HTMLOListElement).start = Number(props.StartIndex);
+      const listStyles: Record<string, string> = {
+        Decimal: "decimal",
+        LowerLatin: "lower-alpha",
+        UpperLatin: "upper-alpha",
+        LowerRoman: "lower-roman",
+        UpperRoman: "upper-roman",
+        Disc: "disc",
+        Circle: "circle",
+        Square: "square",
+        None: "none",
+      };
+      const marker = listStyles[String(props.MarkerStyle)];
+      if (marker) element.style.listStyleType = marker;
+    }
+    if (current.type === "TableCell") {
+      if (Number(props.RowSpan) > 1)
+        (element as HTMLTableCellElement).rowSpan = Math.min(
+          1000,
+          Number(props.RowSpan),
+        );
+      if (Number(props.ColumnSpan) > 1)
+        (element as HTMLTableCellElement).colSpan = Math.min(
+          1000,
+          Number(props.ColumnSpan),
+        );
+    }
+    if (current.type === "Table") {
+      if (Number(props.CellSpacing) > 0) {
+        element.style.borderCollapse = "separate";
+        element.style.borderSpacing = `${Number(props.CellSpacing)}px`;
+      }
+      if (Array.isArray(props.Columns) && props.Columns.length) {
+        const group = owner.createElement("colgroup");
+        for (const column of props.Columns) {
+          const col = owner.createElement("col");
+          const width = cssLength(column?.props?.Width);
+          if (width) col.style.width = width;
+          group.append(col);
+        }
+        element.append(group);
+      }
+    }
+    if (current.type === "Run") {
+      const text = owner.createTextNode(current.text || "");
+      element.append(text);
+      position += text.data.length;
+      result.positions.set(text, { start, end: position });
+      result.leaves.push({ node: text, start, end: position });
+    } else if (current.type === "LineBreak") {
+      position++;
+      result.leaves.push({ node: element, start, end: position, atomic: true });
+    } else if (
+      current.type === "Image" ||
+      current.type === "InlineUIContainer" ||
+      isAtomicBlock
+    ) {
+      if (current.type === "Image") {
+        const image = element as HTMLImageElement;
+        const source = safeImageSource(props.Source);
+        if (source) image.src = source;
+        image.alt = String(props.AlternativeText || "");
+        image.draggable = false;
+        image.loading = "lazy";
+      } else {
+        element.className = "rt-embedded";
+        const embedded = current.children?.find(
+          (child) => child.type === "Image",
+        );
+        if (embedded) {
+          const image = owner.createElement("img");
+          const source = safeImageSource(embedded.props.Source);
+          if (source) image.src = source;
+          image.alt = String(embedded.props.AlternativeText || "");
+          applyStyle(image, embedded.props);
+          element.append(image);
+        } else
+          element.textContent = String(
+            props.AlternativeText || props.Text || "Embedded content",
+          );
+        element.setAttribute("role", "img");
+        element.setAttribute(
+          "aria-label",
+          String(props.AlternativeText || "Embedded content"),
+        );
+      }
+      element.contentEditable = "false";
+      position++;
+      result.leaves.push({ node: element, start, end: position, atomic: true });
+    } else {
+      for (const child of current.children || []) visit(child, element);
+    }
+    if (isParagraph) {
+      if (!element.childNodes.length || start === position) {
+        const br = owner.createElement("br");
+        br.dataset.rtPlaceholder = "";
+        element.append(br);
+        result.positions.set(br, { start: position, end: position });
+      }
+      result.paragraphs.push({ node: element, start, end: position });
+    }
+    result.positions.set(element, { start, end: position });
+    parent.appendChild(element);
+  }
+
+  // The control owns the document's outer surface and applies its document styles.
+  for (const child of node.children || []) visit(child, result.fragment);
+  if (!result.fragment.childNodes.length) {
+    const paragraph = owner.createElement("p");
+    paragraph.dataset.rtParagraph = "";
+    paragraph.append(owner.createElement("br"));
+    result.fragment.append(paragraph);
+    result.positions.set(paragraph, { start: 0, end: 0 });
+    result.paragraphs.push({ node: paragraph, start: 0, end: 0 });
+  }
+  result.length = position;
+  return result;
+}
+
+export function applyDocumentStyle(
+  surface: HTMLElement,
+  props: Record<string, any>,
+): void {
+  // Reset stale document styles when a different document is assigned.
+  surface.removeAttribute("style");
+  applyStyle(surface, props);
+  if (typeof props.ColumnCount === "number" && props.ColumnCount > 1)
+    surface.style.columnCount = String(
+      Math.min(12, Math.floor(props.ColumnCount)),
+    );
+  const gap = cssLength(props.ColumnGap);
+  if (gap) surface.style.columnGap = gap;
+}

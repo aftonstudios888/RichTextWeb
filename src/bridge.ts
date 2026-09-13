@@ -1,0 +1,527 @@
+import { FlowDocument } from "./model.js";
+import type { DocumentNode } from "./model.js";
+import type { RichTextEngine } from "./engine.js";
+import { ObservableEvent, Subscription } from "./mvvm.js";
+import type { IDisposable } from "./mvvm.js";
+
+export const BridgeProtocol = { channel: "richtextweb", version: 1 } as const;
+export interface BridgeRequest {
+  channel: "richtextweb";
+  version: 1;
+  kind: "request";
+  id: string;
+  method: string;
+  params?: Record<string, unknown>;
+}
+export interface BridgeResponse {
+  channel: "richtextweb";
+  version: 1;
+  kind: "response";
+  id: string | null;
+  result?: unknown;
+  error?: { code: string; message: string };
+}
+export interface BridgeEvent {
+  channel: "richtextweb";
+  version: 1;
+  kind: "event";
+  event: "ready" | "documentChanged" | "selectionChanged";
+  payload: unknown;
+}
+export type BridgeOutgoingMessage = BridgeResponse | BridgeEvent;
+export interface BridgeOptions {
+  /** Number of UTF-16 code units accepted per incoming JSON message. Default 8 Mi. */
+  maxMessageLength?: number;
+  maxDocumentNodes?: number;
+  maxDocumentDepth?: number;
+  /** Optional host policy. All edit methods consult it before mutation. */
+  isReadOnly?: () => boolean;
+  /** Full documents are opt-in; default changed events carry state and revision only. */
+  includeDocumentInEvents?: boolean;
+}
+class ProtocolError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+const forbiddenKeys = new Set(["__proto__", "constructor", "prototype"]);
+function record(value: unknown): value is Record<string, unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype ||
+      Object.getPrototypeOf(value) === null)
+  );
+}
+function stringParam(params: Record<string, unknown>, name: string): string {
+  if (typeof params[name] !== "string")
+    throw new ProtocolError("invalid_params", `${name} must be a string`);
+  return params[name] as string;
+}
+function integerParam(params: Record<string, unknown>, name: string): number {
+  if (!Number.isSafeInteger(params[name]))
+    throw new ProtocolError("invalid_params", `${name} must be a safe integer`);
+  return params[name] as number;
+}
+
+/** Validates an incoming envelope and rejects prototype keys/cycles/non-JSON values. */
+export function parseBridgeRequest(
+  input: unknown,
+  maxMessageLength = 8 * 1024 * 1024,
+): BridgeRequest {
+  let value = input;
+  if (typeof input === "string") {
+    if (input.length > maxMessageLength)
+      throw new ProtocolError(
+        "message_too_large",
+        "Bridge message exceeds the configured size limit",
+      );
+    try {
+      value = JSON.parse(input);
+    } catch {
+      throw new ProtocolError(
+        "invalid_json",
+        "Bridge message is not valid JSON",
+      );
+    }
+  }
+  let serialized: string;
+  try {
+    const active = new Set<object>();
+    const visit = (current: unknown, depth: number): void => {
+      if (depth > 128) throw new Error("Object is too deeply nested");
+      if (
+        current === null ||
+        typeof current === "string" ||
+        typeof current === "boolean"
+      )
+        return;
+      if (typeof current === "number" && Number.isFinite(current)) return;
+      if (
+        typeof current !== "object" ||
+        (!record(current) && !Array.isArray(current))
+      )
+        throw new Error("Only JSON values are allowed");
+      if (active.has(current)) throw new Error("Cyclic object");
+      active.add(current);
+      for (const [key, child] of Object.entries(current)) {
+        if (forbiddenKeys.has(key))
+          throw new Error(`Forbidden property: ${key}`);
+        visit(child, depth + 1);
+      }
+      active.delete(current);
+    };
+    visit(value, 0);
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    throw new ProtocolError(
+      "invalid_message",
+      error instanceof Error ? error.message : "Invalid message",
+    );
+  }
+  if (serialized.length > maxMessageLength)
+    throw new ProtocolError(
+      "message_too_large",
+      "Bridge message exceeds the configured size limit",
+    );
+  if (
+    !record(value) ||
+    value.channel !== BridgeProtocol.channel ||
+    value.version !== BridgeProtocol.version ||
+    value.kind !== "request"
+  ) {
+    throw new ProtocolError(
+      "invalid_envelope",
+      "Expected a richtextweb version 1 request",
+    );
+  }
+  if (
+    typeof value.id !== "string" ||
+    !value.id ||
+    value.id.length > 128 ||
+    typeof value.method !== "string" ||
+    value.method.length > 128
+  ) {
+    throw new ProtocolError(
+      "invalid_envelope",
+      "id and method must be nonempty bounded strings",
+    );
+  }
+  if (value.params !== undefined && !record(value.params))
+    throw new ProtocolError("invalid_params", "params must be an object");
+  return value as unknown as BridgeRequest;
+}
+const nodeTypes = new Set([
+  "FlowDocument",
+  "Section",
+  "Paragraph",
+  "Run",
+  "Span",
+  "Bold",
+  "Italic",
+  "Underline",
+  "Hyperlink",
+  "LineBreak",
+  "List",
+  "ListItem",
+  "Table",
+  "TableRowGroup",
+  "TableRow",
+  "TableCell",
+  "TableColumn",
+  "InlineUIContainer",
+  "BlockUIContainer",
+  "Image",
+]);
+function validateDocument(
+  value: unknown,
+  maxNodes: number,
+  maxDepth: number,
+  requireDocument = true,
+): DocumentNode {
+  let nodes = 0;
+  const ids = new Set<string>();
+  const visit = (node: unknown, depth: number): void => {
+    if (++nodes > maxNodes || depth > maxDepth)
+      throw new ProtocolError(
+        "document_too_large",
+        "Document exceeds bridge node/depth limits",
+      );
+    if (
+      !record(node) ||
+      typeof node.type !== "string" ||
+      !nodeTypes.has(node.type) ||
+      typeof node.id !== "string" ||
+      !node.id ||
+      !record(node.props)
+    ) {
+      throw new ProtocolError(
+        "invalid_document",
+        "Every node requires a supported type, nonempty id and props object",
+      );
+    }
+    if (ids.has(node.id))
+      throw new ProtocolError(
+        "invalid_document",
+        `Duplicate node id: ${node.id}`,
+      );
+    ids.add(node.id);
+    if (node.text !== undefined && typeof node.text !== "string")
+      throw new ProtocolError("invalid_document", "Node text must be a string");
+    if (node.children !== undefined) {
+      if (!Array.isArray(node.children))
+        throw new ProtocolError(
+          "invalid_document",
+          "Node children must be an array",
+        );
+      for (const child of node.children) visit(child, depth + 1);
+    }
+  };
+  visit(value, 0);
+  if (requireDocument && (value as DocumentNode).type !== "FlowDocument")
+    throw new ProtocolError(
+      "invalid_document",
+      "Root node must be FlowDocument",
+    );
+  return value as DocumentNode;
+}
+
+/** Owns only its subscriptions, never the supplied engine. No eval or arbitrary member access. */
+export class RichTextWebBridge implements IDisposable {
+  readonly TransportError = new ObservableEvent<unknown>();
+  private readonly subscriptions: IDisposable[] = [];
+  private disposed = false;
+  private readonly maxMessageLength: number;
+  private readonly maxNodes: number;
+  private readonly maxDepth: number;
+  constructor(
+    readonly Engine: RichTextEngine,
+    private readonly postMessage: (message: BridgeOutgoingMessage) => void,
+    private readonly options: BridgeOptions = {},
+  ) {
+    this.maxMessageLength = options.maxMessageLength ?? 8 * 1024 * 1024;
+    this.maxNodes = options.maxDocumentNodes ?? 100_000;
+    this.maxDepth = options.maxDocumentDepth ?? 64;
+    for (const limit of [this.maxMessageLength, this.maxNodes, this.maxDepth])
+      if (!Number.isSafeInteger(limit) || limit < 1)
+        throw new RangeError("Bridge limits must be positive integers");
+    this.subscriptions.push(
+      Engine.Changed.Subscribe(() =>
+        this.emit("documentChanged", {
+          ...this.GetState(),
+          ...(this.options.includeDocumentInEvents
+            ? { document: this.Engine.Document.ToJSON() }
+            : {}),
+        }),
+      ),
+    );
+    this.subscriptions.push(
+      Engine.SelectionChanged.Subscribe(() =>
+        this.emit("selectionChanged", this.selection()),
+      ),
+    );
+  }
+  private send(message: BridgeOutgoingMessage): void {
+    if (this.disposed) return;
+    try {
+      this.postMessage(message);
+    } catch (error) {
+      this.TransportError.Emit(error);
+    }
+  }
+  private emit(event: BridgeEvent["event"], payload: unknown): void {
+    this.send({ ...BridgeProtocol, kind: "event", event, payload });
+  }
+  private selection(): { start: number; end: number; text: string } {
+    return {
+      start: this.Engine.Selection.Start.Offset,
+      end: this.Engine.Selection.End.Offset,
+      text: this.Engine.Selection.Text,
+    };
+  }
+  GetState(): {
+    revision: number;
+    textLength: number;
+    canUndo: boolean;
+    canRedo: boolean;
+    readOnly: boolean;
+    selection: { start: number; end: number; text: string };
+  } {
+    return {
+      revision: this.Engine.Document.Revision,
+      textLength: this.Engine.Document.Text.length,
+      canUndo: this.Engine.CanUndo,
+      canRedo: this.Engine.CanRedo,
+      readOnly: this.options.isReadOnly?.() ?? false,
+      selection: this.selection(),
+    };
+  }
+  NotifyReady(): void {
+    this.emit("ready", this.GetState());
+  }
+  /** Returns a response, without posting it. Events caused by an edit are still posted. */
+  HandleMessage(input: unknown): BridgeResponse {
+    let id: string | null = null;
+    try {
+      if (this.disposed)
+        throw new ProtocolError("disposed", "Bridge is disposed");
+      const request = parseBridgeRequest(input, this.maxMessageLength);
+      id = request.id;
+      const params = request.params ?? {};
+      const mutating = new Set([
+        "setDocument",
+        "insertText",
+        "insertNode",
+        "deleteBackward",
+        "deleteForward",
+        "applyProperty",
+        "setParagraphProperty",
+        "undo",
+        "redo",
+        "execute",
+      ]);
+      if (mutating.has(request.method)) {
+        if (this.options.isReadOnly?.())
+          throw new ProtocolError(
+            "read_only",
+            "The host document is read-only",
+          );
+        if (
+          params.expectedRevision !== undefined &&
+          integerParam(params, "expectedRevision") !==
+            this.Engine.Document.Revision
+        )
+          throw new ProtocolError(
+            "revision_conflict",
+            "The document has changed since the expected revision",
+          );
+      }
+      let result: unknown;
+      switch (request.method) {
+        case "getDocument":
+          result = this.Engine.Document.ToJSON();
+          break;
+        case "getText":
+          result = this.Engine.Document.Text;
+          break;
+        case "getState":
+          result = this.GetState();
+          break;
+        case "setDocument":
+          this.Engine.SetDocument(
+            FlowDocument.FromJSON(
+              validateDocument(params.document, this.maxNodes, this.maxDepth),
+            ),
+          );
+          result = this.GetState();
+          break;
+        case "select": {
+          const start = integerParam(params, "start");
+          const end = integerParam(params, "end");
+          if (
+            start < 0 ||
+            end < 0 ||
+            start > this.Engine.Document.Text.length ||
+            end > this.Engine.Document.Text.length
+          )
+            throw new ProtocolError(
+              "invalid_params",
+              "Selection offsets must be inside the document",
+            );
+          this.Engine.Select(start, end);
+          result = this.selection();
+          break;
+        }
+        case "insertText":
+          this.Engine.InsertText(stringParam(params, "text"));
+          result = this.GetState();
+          break;
+        case "insertNode":
+          this.Engine.InsertNode(
+            validateDocument(params.node, this.maxNodes, this.maxDepth, false),
+          );
+          result = this.GetState();
+          break;
+        case "deleteBackward":
+          this.Engine.DeleteBackward();
+          result = this.GetState();
+          break;
+        case "deleteForward":
+          this.Engine.DeleteForward();
+          result = this.GetState();
+          break;
+        case "applyProperty":
+        case "setParagraphProperty": {
+          const name = stringParam(params, "name");
+          if (
+            forbiddenKeys.has(name) ||
+            !/^[A-Za-z][A-Za-z0-9]{0,127}$/.test(name)
+          )
+            throw new ProtocolError(
+              "invalid_params",
+              "Property name must be an identifier",
+            );
+          if (!Object.prototype.hasOwnProperty.call(params, "value"))
+            throw new ProtocolError(
+              "invalid_params",
+              "Property value is required",
+            );
+          if (request.method === "applyProperty")
+            this.Engine.ApplyProperty(name, params.value);
+          else this.Engine.SetParagraphProperty(name, params.value);
+          result = this.GetState();
+          break;
+        }
+        case "undo":
+          this.Engine.Undo();
+          result = this.GetState();
+          break;
+        case "redo":
+          this.Engine.Redo();
+          result = this.GetState();
+          break;
+        case "execute": {
+          const command = stringParam(params, "command");
+          // Engine Execute also validates command names; it does not reflect into object methods.
+          this.Engine.Execute(command, params.parameter);
+          result = this.GetState();
+          break;
+        }
+        default:
+          throw new ProtocolError(
+            "unknown_method",
+            `Unknown bridge method: ${request.method}`,
+          );
+      }
+      return { ...BridgeProtocol, kind: "response", id, result };
+    } catch (error) {
+      return {
+        ...BridgeProtocol,
+        kind: "response",
+        id,
+        error: {
+          code:
+            error instanceof ProtocolError ? error.code : "operation_failed",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+  Receive(input: unknown): BridgeResponse {
+    const response = this.HandleMessage(input);
+    this.send(response);
+    return response;
+  }
+  Dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const subscription of this.subscriptions) subscription.Dispose();
+    this.TransportError.Clear();
+  }
+}
+
+export interface WebViewMessageHost {
+  postMessage(message: unknown): void;
+  addEventListener(
+    type: "message",
+    listener: (event: { data: unknown }) => void,
+  ): void;
+  removeEventListener(
+    type: "message",
+    listener: (event: { data: unknown }) => void,
+  ): void;
+}
+/** Explicit WebView2 attachment. Does not attach untrusted window.postMessage listeners. */
+export function connectWebView2(
+  engine: RichTextEngine,
+  host: WebViewMessageHost,
+  options?: BridgeOptions,
+): RichTextWebBridge & { Dispose(): void } {
+  const bridge = new RichTextWebBridge(
+    engine,
+    (message) => host.postMessage(message),
+    options,
+  );
+  const listener = (event: { data: unknown }) => bridge.Receive(event.data);
+  host.addEventListener("message", listener);
+  const dispose = bridge.Dispose.bind(bridge);
+  bridge.Dispose = () => {
+    host.removeEventListener("message", listener);
+    dispose();
+  };
+  bridge.NotifyReady();
+  return bridge;
+}
+
+/** Avalonia/other hosts call receiveRichTextWebMessage(JSON); native outbound is explicitly injected. */
+export function connectScriptHost(
+  engine: RichTextEngine,
+  globalObject: Record<string, unknown>,
+  sendToNative: (json: string) => void,
+  options?: BridgeOptions,
+): RichTextWebBridge {
+  const name = "receiveRichTextWebMessage";
+  if (Object.prototype.hasOwnProperty.call(globalObject, name))
+    throw new Error(`${name} is already installed`);
+  const bridge = new RichTextWebBridge(
+    engine,
+    (message) => sendToNative(JSON.stringify(message)),
+    options,
+  );
+  const receive = (message: unknown) => bridge.Receive(message);
+  globalObject[name] = receive;
+  const cleanup = new Subscription(() => {
+    if (globalObject[name] === receive) delete globalObject[name];
+  });
+  const dispose = bridge.Dispose.bind(bridge);
+  bridge.Dispose = () => {
+    cleanup.Dispose();
+    dispose();
+  };
+  bridge.NotifyReady();
+  return bridge;
+}

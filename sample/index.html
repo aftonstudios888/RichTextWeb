@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#1254a3" />
+    <title>RichTextWeb · Document Studio</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231254a3'/%3E%3Cpath d='M8 8h16M16 8v17M11 25h10' stroke='white' stroke-width='3' fill='none'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="studio">
+      <header class="titlebar">
+        <a class="brand" href="./" aria-label="RichTextWeb home"
+          ><span class="brand-icon">T</span><strong>RichTextWeb</strong></a
+        ><span class="divider"></span
+        ><input
+          id="document-title"
+          aria-label="Document title"
+          value="The way we work"
+        /><span id="save-state" class="save-state">Saved on this device</span>
+        <div class="title-actions">
+          <button id="theme-toggle" aria-label="Toggle color theme">◐</button
+          ><a
+            href="https://github.com/wieslawsoltes/RichTextWeb"
+            target="_blank"
+            rel="noreferrer"
+            >Source ↗</a
+          ><button class="share-button" id="export-primary">
+            Export document
+          </button>
+        </div>
+      </header>
+      <nav class="tabs" aria-label="Editor tools">
+        <button data-tab="file">File</button
+        ><button data-tab="home" class="active" aria-selected="true">
+          Home</button
+        ><button data-tab="insert">Insert</button
+        ><button data-tab="layout">Layout</button
+        ><button data-tab="review">Review</button
+        ><button data-tab="view">View</button
+        ><button data-tab="developer">Developer</button
+        ><span class="tabs-tail"
+          >DOCUMENT STUDIO <span class="version">v0.1</span></span
+        >
+      </nav>
+      <section
+        class="ribbon"
+        id="ribbon"
+        aria-label="Formatting controls"
+      ></section>
+      <main class="workspace">
+        <aside class="navigation" aria-label="Document navigation">
+          <div class="pane-heading">
+            Navigation<button
+              id="toggle-navigation"
+              aria-label="Hide navigation"
+            >
+              ‹
+            </button>
+          </div>
+          <label class="search"
+            ><span>⌕</span
+            ><input
+              id="find-input"
+              placeholder="Find in document"
+              aria-label="Find in document"
+            /><kbd>⌘ F</kbd></label
+          >
+          <div id="find-tools" hidden>
+            <div class="find-results">
+              <span id="find-count">No matches</span
+              ><button id="find-next">Next ↓</button>
+            </div>
+            <input
+              id="replace-input"
+              placeholder="Replace with"
+              aria-label="Replace with"
+            /><button id="replace-all" class="plain-button">Replace all</button>
+          </div>
+          <div class="side-tabs">
+            <button class="active" data-side="outline">Outline</button
+            ><button data-side="examples">Examples</button>
+          </div>
+          <div id="outline" class="outline"></div>
+          <div id="examples" class="examples" hidden></div>
+          <div class="navigation-footer">
+            <span class="small-label">DOCUMENT ENGINE</span
+            ><strong>One model. Every surface.</strong
+            ><span
+              >Flow documents · Rich text · Markdown · HTML · PDF tools</span
+            >
+          </div>
+        </aside>
+        <section class="canvas" aria-label="Document editor">
+          <div class="canvas-heading">
+            <div>
+              <span id="document-kind">FLOW DOCUMENT</span
+              ><span class="dot-separator">/</span
+              ><span id="view-label">Print layout</span>
+            </div>
+            <button id="focus-mode" title="Toggle focus mode">
+              ⛶ <span>Focus</span>
+            </button>
+          </div>
+          <div class="ruler" aria-hidden="true">
+            <span>0</span><span>1</span><span>2</span><span>3</span
+            ><span>4</span><span>5</span><span>6</span>
+          </div>
+          <rich-text-box
+            id="editor"
+            aria-label="Document content"
+          ></rich-text-box>
+          <div class="canvas-bottom">
+            Click anywhere in the document to start writing.
+          </div>
+        </section>
+        <aside class="inspector" aria-label="Document properties">
+          <div class="pane-heading">
+            <span id="inspector-title">Document</span
+            ><button id="toggle-inspector" aria-label="Hide properties">
+              ›
+            </button>
+          </div>
+          <div class="inspector-tabs">
+            <button
+              class="active"
+              data-panel="document"
+              title="Document properties"
+            >
+              ☷</button
+            ><button data-panel="comments" title="Comments">▤</button
+            ><button data-panel="source" title="Document source">
+              &lt;/&gt;</button
+            ><button data-panel="export" title="Export formats">↗</button>
+          </div>
+          <div id="inspector-content"></div>
+        </aside>
+      </main>
+      <footer class="statusbar">
+        <button id="show-navigation">☷ <span>Navigation</span></button
+        ><span id="word-count">0 words</span
+        ><span id="selection-status">No selection</span
+        ><span class="status-spacer"></span><span id="editor-mode">Editing</span
+        ><button id="view-toggle">▣ <span>Page</span></button
+        ><button id="zoom-out" aria-label="Zoom out">−</button
+        ><input
+          id="zoom"
+          type="range"
+          min="50"
+          max="150"
+          value="100"
+          aria-label="Zoom"
+        /><button id="zoom-in" aria-label="Zoom in">+</button
+        ><span id="zoom-label">100%</span>
+      </footer>
+    </div>
+    <dialog id="dialog">
+      <form method="dialog">
+        <div class="dialog-title">
+          <h2 id="dialog-title"></h2>
+          <button value="cancel" aria-label="Close dialog">×</button>
+        </div>
+        <div id="dialog-content"></div>
+        <div class="dialog-actions">
+          <button value="cancel">Cancel</button
+          ><button id="dialog-submit" value="default" class="primary">
+            Apply
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <input
+      id="file-input"
+      type="file"
+      accept=".json,.txt,.md,.markdown,.html,.htm,.xaml,.rtf,.docx"
+      hidden
+    />
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

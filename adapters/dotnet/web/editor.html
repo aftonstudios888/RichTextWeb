@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RichTextWeb native host</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        font: 14px system-ui;
+      }
+      rich-text-box {
+        display: block;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <rich-text-box aria-label="Document editor"></rich-text-box>
+    <script type="module">
+      import {
+        connectScriptHost,
+        connectWebView2,
+        registerRichTextWeb,
+      } from "./dist/esm/index.js";
+      registerRichTextWeb();
+      const editor = document.querySelector("rich-text-box");
+      const options = {
+        isReadOnly: () => editor.IsReadOnly,
+        includeDocumentInEvents: true,
+      };
+      if (typeof window.invokeCSharpAction === "function") {
+        window.richTextBridge = connectScriptHost(
+          editor.Engine,
+          window,
+          (json) => window.invokeCSharpAction(json),
+          options,
+        );
+      } else if (window.chrome?.webview) {
+        window.richTextBridge = connectWebView2(
+          editor.Engine,
+          window.chrome.webview,
+          options,
+        );
+      } else {
+        const notice = document.createElement("p");
+        notice.textContent =
+          "Native messaging is unavailable. This editor still works in your browser.";
+        document.body.prepend(notice);
+      }
+      window.addEventListener(
+        "pagehide",
+        () => window.richTextBridge?.Dispose(),
+        { once: true },
+      );
+    </script>
+  </body>
+</html>

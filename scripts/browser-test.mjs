@@ -1,0 +1,160 @@
+import { chromium } from "playwright";
+import { spawn } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+import { runControlBrowserChecks } from "../tests/control.browser.mjs";
+import { runReactBrowserChecks } from "../tests/react.browser.mjs";
+import { runReviewBrowserChecks } from "../tests/review.browser.mjs";
+const port = process.env.PORT || "4190";
+const external = process.env.BROWSER_TEST_URL;
+const base = external || `http://127.0.0.1:${port}`;
+const server = external
+  ? null
+  : spawn(process.execPath, ["scripts/serve.mjs"], {
+      env: { ...process.env, PORT: port },
+      stdio: "ignore",
+    });
+await mkdir("test-results", { recursive: true });
+let browser;
+const results = [];
+try {
+  for (let n = 0; n < 100; n++) {
+    try {
+      if ((await fetch(base)).ok) break;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const options = { headless: true };
+  if (process.env.CHROMIUM_EXECUTABLE) {
+    options.executablePath = process.env.CHROMIUM_EXECUTABLE;
+    options.args = [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+    ];
+  }
+  browser = await chromium.launch(options);
+  const page = await browser.newPage({
+    viewport: { width: 1512, height: 982 },
+    deviceScaleFactor: 1,
+  });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto(base, { waitUntil: "networkidle" });
+  await page.waitForFunction(
+    () => window.richTextStudio?.editor?.Document.Text.length > 0,
+  );
+  await page.screenshot({
+    path: "test-results/studio-desktop.png",
+    fullPage: true,
+  });
+  const initial = await page.evaluate(() => ({
+    text: richTextStudio.editor.Document.Text,
+    headings: document.querySelectorAll("#outline button").length,
+    zoom: richTextStudio.editor.Zoom,
+  }));
+  assert(initial.text.includes("The way we work"));
+  assert(initial.headings >= 4);
+  assert.equal(initial.zoom, 1);
+  results.push("Sample initial document, outline and zoom");
+  const controlResults = await runControlBrowserChecks(page);
+  results.push(
+    ...(Array.isArray(controlResults)
+      ? controlResults
+      : Array.from(
+          { length: controlResults },
+          (_, i) => `Control browser check ${i + 1}`,
+        )),
+  );
+  const reactResults = await runReactBrowserChecks(page);
+  results.push(
+    ...Array.from(
+      { length: reactResults },
+      (_, i) => `React browser check ${i + 1}`,
+    ),
+  );
+  await page.getByRole("button", { name: "Developer", exact: true }).click();
+  await page.getByRole("button", { name: "Markdown", exact: true }).click();
+  await page
+    .locator("#source-code")
+    .fill("# Browser test\n\nHello **rich text** world.");
+  await page.locator("#apply-source").click();
+  assert.equal(
+    await page.evaluate(() => richTextStudio.editor.Document.Text),
+    "Browser test\nHello rich text world.",
+  );
+  results.push("Markdown source editing updates model");
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await page.evaluate(() => richTextStudio.editor.Select(13, 18));
+  await page.locator('[data-command="bold"]').click();
+  assert(
+    await page.evaluate(() =>
+      richTextStudio.RT.toHTML(richTextStudio.editor.Document).includes(
+        "font-weight:bold",
+      ),
+    ),
+  );
+  results.push("Ribbon formatting retains document selection");
+  await page.getByRole("button", { name: "Insert", exact: true }).click();
+  await page.locator('[data-command="table"]').click();
+  await page.locator("#table-rows").fill("2");
+  await page.locator("#table-columns").fill("2");
+  await page.locator("#dialog-submit").click();
+  await page.waitForFunction(() =>
+    richTextStudio.RT.toHTML(richTextStudio.editor.Document).includes("<table"),
+  );
+  results.push("Table insertion from dialog");
+  results.push(...(await runReviewBrowserChecks(page)));
+  await page.evaluate(() => richTextStudio.loadTemplate("welcome"));
+  await page.locator("#export-primary").click();
+  const pendingDownload = page.waitForEvent("download");
+  await page.locator('[data-export="docx"]').click();
+  const dl = await pendingDownload;
+  assert(dl.suggestedFilename().endsWith(".docx"));
+  results.push("DOCX export download");
+  await page.getByRole("button", { name: "File", exact: true }).click();
+  await page.locator('[data-command="pdf-tools"]').click();
+  await page.waitForFunction(
+    () => document.querySelector("[data-page]")?.options.length > 0,
+  );
+  await page.locator("[data-add]").click();
+  const pendingPDF = page.waitForEvent("download");
+  await page.locator("[data-save]").click();
+  assert((await pendingPDF).suggestedFilename().endsWith(".pdf"));
+  await page.locator("[data-close]").click();
+  results.push("PDF workspace conversion, overlay and download");
+  await page.locator("#theme-toggle").click();
+  assert(
+    await page.locator("body").evaluate((el) => el.classList.contains("dark")),
+  );
+  await page.screenshot({ path: "test-results/studio-dark.png" });
+  results.push("Dark theme");
+  await page.locator("#theme-toggle").click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({
+    path: "test-results/studio-mobile.png",
+    fullPage: true,
+  });
+  assert(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  );
+  results.push("Mobile shell has no horizontal overflow");
+  await page.setViewportSize({ width: 1512, height: 982 });
+  await page.locator('[data-panel="document"]').click();
+  await page.screenshot({
+    path: "test-results/studio-desktop.png",
+    fullPage: true,
+  });
+  assert.deepEqual(errors, []);
+  results.push("No uncaught browser errors");
+  await writeFile(
+    "test-results/browser.json",
+    JSON.stringify({ browser: browser.version(), results }, null, 2),
+  );
+  console.log(JSON.stringify({ passed: results.length, results }, null, 2));
+} finally {
+  await browser?.close();
+  server?.kill();
+}

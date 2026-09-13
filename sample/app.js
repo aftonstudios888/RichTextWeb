@@ -1,0 +1,1355 @@
+import * as RT from "../src/index.ts";
+import { openPDFTools } from "./pdf-tools.js";
+const $ = (id) => document.getElementById(id);
+RT.registerRichTextWeb?.();
+const editor = $("editor");
+let tab = "home",
+  panel = "document",
+  sourceFormat = "markdown",
+  saved = true,
+  currentMatches = [],
+  matchIndex = 0;
+const state = { title: "The way we work", theme: "light", zoom: 100 };
+const mutationCommands = new Set([
+  "undo",
+  "redo",
+  "bold",
+  "italic",
+  "underline",
+  "strike",
+  "superscript",
+  "align-left",
+  "align-center",
+  "align-right",
+  "align-justify",
+  "normal",
+  "heading1",
+  "heading2",
+  "clear-format",
+  "bullets",
+  "numbering",
+  "new",
+  "open",
+  "table",
+  "table-row-before",
+  "table-row-after",
+  "table-row-delete",
+  "table-column-before",
+  "table-column-after",
+  "table-column-delete",
+  "table-delete",
+  "link",
+  "image",
+  "page-break",
+  "date",
+  "symbol",
+  "code",
+  "a4",
+  "letter",
+  "landscape",
+  "margins",
+  "spacing",
+  "indent",
+  "outdent",
+  "comment",
+  "bookmark",
+  "large-document",
+]);
+const esc = (s) =>
+  String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+let toastTimer;
+function toast(message) {
+  $("toast").textContent = message;
+  $("toast").classList.add("visible");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("visible"), 3500);
+}
+function safe(fn) {
+  try {
+    const result = fn();
+    if (result?.catch) result.catch((e) => toast(e.message));
+    return result;
+  } catch (e) {
+    toast(e.message);
+    console.error(e);
+  }
+}
+function action(fn) {
+  safe(() => {
+    fn();
+    editor.Focus?.();
+    update();
+  });
+}
+function canEdit() {
+  if (!editor.IsReadOnly) return true;
+  toast("Turn off read-only mode to edit this document.");
+  return false;
+}
+function edit(fn) {
+  if (canEdit())
+    return action(() => {
+      if (canEdit()) fn();
+    });
+}
+function updateReadOnlyControls() {
+  const locked = editor.IsReadOnly;
+  document.querySelectorAll("[data-command]").forEach((button) => {
+    if (mutationCommands.has(button.dataset.command))
+      button.disabled =
+        locked ||
+        (button.dataset.command === "undo" && !editor.Engine.CanUndo) ||
+        (button.dataset.command === "redo" && !editor.Engine.CanRedo);
+  });
+  for (const id of [
+    "font-family",
+    "font-size",
+    "text-color",
+    "highlight-color",
+    "paper-size",
+    "orientation",
+    "margins-select",
+    "apply-source",
+    "replace-all",
+    "new-comment",
+    "new-bookmark",
+    "document-title",
+  ])
+    if ($(id)) $(id).disabled = locked;
+  document
+    .querySelectorAll(
+      "[data-comment-resolve],[data-comment-delete],[data-bookmark-delete],[data-example]",
+    )
+    .forEach((button) => (button.disabled = locked));
+  if ($("source-code")) $("source-code").readOnly = locked;
+}
+const templates = {
+  welcome: {
+    name: "The way we work",
+    description: "A polished document with styles, tables, lists, and links.",
+    html: `<p style="color:#1254a3;font-size:12px;letter-spacing:2px">NORTHSTAR / FIELD NOTES 01</p><h1 style="font-size:42px;color:#172d4e;font-family:Georgia">The way we work</h1><p style="font-size:18px;color:#718097">A practical guide to making room for meaningful work.</p><p style="color:#788392;font-size:12px">SEPTEMBER 2026 &nbsp; · &nbsp; WORKPLACE & CULTURE</p><p>Good work begins with a clear idea. A few considered words become a shared direction. A shared direction becomes something worth building.</p><h2 style="color:#1c487f;font-size:22px">01 &nbsp; Start with what matters</h2><p>We believe the best documents make complex ideas feel simple. They give every thought a place, every decision a reason, and every reader a way forward.</p><p><strong>Our principle:</strong> write with intention. Use structure to support your message, and give important ideas the space they deserve.</p><h2 style="color:#1c487f;font-size:22px">02 &nbsp; Build a shared rhythm</h2><p>A little structure creates a lot of freedom. These three practices help our team stay connected without adding more meetings.</p><table><tbody><tr><td style="background:#edf3fb"><p><strong>Practice</strong></p></td><td style="background:#edf3fb"><p><strong>When</strong></p></td><td style="background:#edf3fb"><p><strong>Purpose</strong></p></td></tr><tr><td><p>Weekly note</p></td><td><p>Monday</p></td><td><p>Set a clear intention</p></td></tr><tr><td><p>Open studio</p></td><td><p>Wednesday</p></td><td><p>Share work in progress</p></td></tr><tr><td><p>Reflection</p></td><td><p>Friday</p></td><td><p>Learn and carry it forward</p></td></tr></tbody></table><h2 style="color:#1c487f;font-size:22px">03 &nbsp; Make the next step clear</h2><ul><li><p>Choose one outcome that will make a difference.</p></li><li><p>Leave room for curiosity and unexpected connections.</p></li><li><p>Share your thinking early. Better work happens together.</p></li></ul><p><em>Clarity is a practice. This document is a place to begin.</em></p>`,
+  },
+  blank: {
+    name: "Untitled document",
+    description: "A clean page for your next idea.",
+    html: "<p></p>",
+  },
+  report: {
+    name: "Quarterly review",
+    description: "A report with headings, ordered lists, and a data table.",
+    html: "<h1>Quarterly review</h1><p><strong>Prepared by:</strong> Studio team · <em>September 2026</em></p><h2>Executive overview</h2><p>This quarter, our work focused on three priorities: clarity, consistency, and a better experience for everyone.</p><h2>Key results</h2><table><tr><td><p><strong>Measure</strong></p></td><td><p><strong>Previous</strong></p></td><td><p><strong>Current</strong></p></td></tr><tr><td><p>Completed projects</p></td><td><p>12</p></td><td><p>18</p></td></tr><tr><td><p>Team satisfaction</p></td><td><p>82%</p></td><td><p>91%</p></td></tr></table><h2>Next quarter</h2><ol><li><p>Consolidate research into a shared resource.</p></li><li><p>Refine the onboarding experience.</p></li><li><p>Document decisions as they happen.</p></li></ol>",
+  },
+  formatting: {
+    name: "Typography & formatting",
+    description: "Inline styles, multilingual text, and nested formatting.",
+    html: '<h1>Every word, considered.</h1><h2>Inline formatting</h2><p>Text can be <strong>bold</strong>, <em>italic</em>, <u>underlined</u>, <s>struck through</s>, <span style="color:#1254a3">colored</span>, or <span style="background:#fff0a6">highlighted</span>. Combine <strong><em>styles naturally</em></strong>.</p><p>Superscript: E = mc<sup>2</sup>. Subscript: H<sub>2</sub>O.</p><h2>Languages belong together</h2><p>Zażółć gęślą jaźń. Καλημέρα κόσμε. こんにちは世界。 안녕하세요. 👩🏽‍💻 🌍</p><p dir="rtl">مرحبا بالعالم — أهلاً وسهلاً</p><h2>Links and line breaks</h2><p>Visit <a href="https://github.com/wieslawsoltes/RichTextWeb">the project repository</a>.<br>A line break keeps text in the same paragraph.</p><blockquote><p>“The details are not the details. They make the design.”</p></blockquote>',
+  },
+  lists: {
+    name: "Lists & planning",
+    description: "Nested lists, numbered steps, and checklists.",
+    html: "<h1>A plan worth following</h1><h2>Project checklist</h2><ul><li><p>Gather the context</p><ul><li><p>Review existing research</p></li><li><p>Talk to the people doing the work</p></li></ul></li><li><p>Frame the opportunity</p></li><li><p>Create a small, useful prototype</p></li></ul><h2>Working sequence</h2><ol><li><p>Explore the question.</p></li><li><p>Test the assumptions.</p></li><li><p>Share the results.</p></li></ol><h2>Notes</h2><p>Use the Home ribbon to change paragraph alignment, style, and spacing.</p>",
+  },
+  api: {
+    name: "Flow document API",
+    description: "A document created entirely with .NET-style JavaScript APIs.",
+    build() {
+      const d = new RT.FlowDocument();
+      const h = new RT.Paragraph(new RT.Run("A familiar document model"));
+      h.HeadingLevel = 1;
+      d.Blocks.Add(h);
+      const p = new RT.Paragraph();
+      p.Inlines.Add(new RT.Run("Compose documents with "));
+      p.Inlines.Add(
+        new RT.Bold(new RT.Run("FlowDocument, Paragraph, and Run")),
+      );
+      p.Inlines.Add(
+        new RT.Run(". The same model powers editing and serialization."),
+      );
+      d.Blocks.Add(p);
+      d.Blocks.Add(
+        new RT.Paragraph(
+          new RT.Run(
+            "Select this text, format it, then inspect the document source on the right.",
+          ),
+        ),
+      );
+      return d;
+    },
+  },
+};
+function loadTemplate(key) {
+  if (!canEdit()) return;
+  const t = templates[key];
+  editor.Document = t.build ? t.build() : RT.fromHTML(t.html);
+  state.title = t.name;
+  $("document-title").value = t.name;
+  update();
+  if (panel === "comments") renderPanel();
+  persist();
+  toast(`Opened ${t.name}`);
+}
+function persist() {
+  try {
+    localStorage.setItem(
+      "richtextweb-document",
+      JSON.stringify({
+        document: editor.Document.ToJSON(),
+        title: $("document-title").value,
+      }),
+    );
+    $("save-state").textContent = "Saved on this device";
+    saved = true;
+  } catch {
+    $("save-state").textContent = "Storage unavailable";
+  }
+}
+let saveTimer;
+function changed() {
+  saved = false;
+  $("save-state").textContent = "Saving…";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(persist, 300);
+  update();
+  if (panel === "comments") renderPanel();
+}
+function walk(node, fn) {
+  fn(node);
+  node.children?.forEach((n) => walk(n, fn));
+}
+function outline() {
+  const headings = [];
+  let offset = 0;
+  walk(editor.Document.ToJSON(), (n) => {
+    if (n.type === "Paragraph" || n.type === "BlockUIContainer") {
+      const text = plain(n);
+      if (n.props?.HeadingLevel)
+        headings.push({ text, level: n.props.HeadingLevel, offset });
+      offset += text.length + 1;
+    }
+  });
+  $("outline").innerHTML = headings.length
+    ? headings
+        .map(
+          (h) =>
+            `<button class="${h.level > 1 ? "level2" : ""}" data-offset="${h.offset}">${esc(h.text)}</button>`,
+        )
+        .join("")
+    : '<p class="note" style="padding:10px">Apply a heading style to build an outline.</p>';
+  $("outline")
+    .querySelectorAll("button")
+    .forEach(
+      (b) =>
+        (b.onclick = () =>
+          action(() => {
+            const o = Math.min(
+              Number(b.dataset.offset),
+              editor.Document.Text.length,
+            );
+            editor.Engine.Select(o, o);
+            editor.Focus();
+          })),
+    );
+}
+function plain(n) {
+  return n.type === "Run"
+    ? n.text || ""
+    : n.type === "LineBreak"
+      ? "\n"
+      : ["Image", "InlineUIContainer", "BlockUIContainer"].includes(n.type)
+        ? "\uFFFC"
+        : (n.children || []).map(plain).join("");
+}
+function update() {
+  if (!editor.Document) return;
+  const text = editor.Document.Text;
+  const words = text.trim() ? text.trim().split(/\s+/u).length : 0;
+  $("word-count").textContent = `${words.toLocaleString()} words`;
+  const sel = editor.Selection;
+  const size = sel ? Math.abs(sel.End.Offset - sel.Start.Offset) : 0;
+  $("selection-status").textContent = size
+    ? `${size} characters selected`
+    : `${text.length.toLocaleString()} characters`;
+  $("editor-mode").textContent = editor.IsReadOnly ? "Read only" : "Editing";
+  outline();
+  if (panel === "document") updateStats();
+  updateReadOnlyControls();
+}
+function updateStats() {
+  const node = editor.Document.ToJSON();
+  let blocks = 0;
+  walk(node, (n) => {
+    if (n.type === "Paragraph") blocks++;
+  });
+  if ($("stat-paragraphs")) $("stat-paragraphs").textContent = blocks;
+  if ($("stat-characters"))
+    $("stat-characters").textContent =
+      editor.Document.Text.length.toLocaleString();
+  if ($("stat-revision"))
+    $("stat-revision").textContent = editor.Document.Revision;
+}
+function tool(label, command, glyph = "", large = false, title = label) {
+  return `<button class="tool${large ? " large" : ""}" data-command="${command}" title="${esc(title)}" aria-label="${esc(label)}">${glyph ? `<span class="glyph">${glyph}</span>` : ""}<span>${label}</span></button>`;
+}
+function group(name, content) {
+  return `<div class="ribbon-group"><div class="ribbon-content">${content}</div><div class="ribbon-label">${name}</div></div>`;
+}
+const row = (html) => `<div class="ribbon-row">${html}</div>`,
+  stack = (html) => `<div class="ribbon-stack">${html}</div>`;
+function renderRibbon() {
+  let html = "";
+  if (tab === "home")
+    html =
+      group(
+        "History",
+        stack(
+          row(
+            tool("↶", "undo", "", "", "Undo (Ctrl+Z)") +
+              tool("↷", "redo", "", "", "Redo (Ctrl+Y)"),
+          ) + row(tool("Select all", "select-all")),
+        ),
+      ) +
+      group(
+        "Font",
+        stack(
+          row(
+            '<select id="font-family" aria-label="Font family"><option>Segoe UI</option><option>Arial</option><option>Georgia</option><option>Times New Roman</option><option>Verdana</option><option>Consolas</option></select><select id="font-size" aria-label="Font size"><option>12</option><option>14</option><option selected>16</option><option>18</option><option>20</option><option>24</option><option>32</option><option>42</option><option>56</option></select>',
+          ) +
+            row(
+              tool("<b>B</b>", "bold", "", "", "Bold (Ctrl+B)") +
+                tool("<i>I</i>", "italic", "", "", "Italic (Ctrl+I)") +
+                tool("<u>U</u>", "underline", "", "", "Underline (Ctrl+U)") +
+                tool("<s>S</s>", "strike", "", "", "Strikethrough") +
+                tool("x²", "superscript", "", "", "Superscript") +
+                '<input type="color" id="text-color" value="#1254a3" title="Text color" aria-label="Text color"><input type="color" id="highlight-color" value="#fff0a6" title="Highlight" aria-label="Highlight color">',
+            ),
+        ),
+      ) +
+      group(
+        "Paragraph",
+        stack(
+          row(
+            tool("≡", "align-left", "", "", "Align left") +
+              tool("☰", "align-center", "", "", "Align center") +
+              tool("≡", "align-right", "", "", "Align right") +
+              tool("▤", "align-justify", "", "", "Justify"),
+          ) +
+            row(
+              tool("• List", "bullets") +
+                tool("1. List", "numbering") +
+                tool("↕", "spacing", "", "", "Line spacing"),
+            ),
+        ),
+      ) +
+      group(
+        "Styles",
+        `<button class="style-card" data-command="normal"><strong>AaBbCc</strong><span>Normal</span></button><button class="style-card heading" data-command="heading1"><strong>Heading 1</strong><span>Title</span></button><button class="style-card heading" data-command="heading2"><strong>Heading 2</strong><span>Section</span></button>`,
+      ) +
+      group(
+        "Editing",
+        tool("Find", "find", "⌕", true) +
+          tool("Clear", "clear-format", "A̸", true),
+      );
+  else if (tab === "file")
+    html =
+      group(
+        "Document",
+        tool("New", "new", "▱", true) +
+          tool("Open", "open", "▣", true) +
+          tool("Save", "save", "↓", true),
+      ) +
+      group(
+        "Export",
+        tool("Word", "export-docx", "W", true) +
+          tool("PDF", "export-pdf", "▤", true) +
+          tool("Markdown", "export-markdown", "M↓", true) +
+          tool("HTML", "export-html", "⌘", true) +
+          tool("Rich text", "export-rtf", "¶", true) +
+          tool("JSON", "export-json", "{}", true),
+      ) +
+      group(
+        "Output",
+        tool("Print", "print", "▧", true) +
+          tool("PDF tools", "pdf-tools", "▤", true),
+      );
+  else if (tab === "insert")
+    html =
+      group(
+        "Structure",
+        tool("Table", "table", "▦", true) +
+          tool("Image", "image", "▧", true) +
+          tool("Link", "link", "↗", true) +
+          tool("Page break", "page-break", "▱", true),
+      ) +
+      group(
+        "Edit table",
+        stack(
+          row(
+            tool("Row above", "table-row-before") +
+              tool("Row below", "table-row-after") +
+              tool("Delete row", "table-row-delete"),
+          ) +
+            row(
+              tool("Column left", "table-column-before") +
+                tool("Column right", "table-column-after") +
+                tool("Delete column", "table-column-delete"),
+            ),
+        ),
+      ) +
+      group(
+        "Text",
+        tool("Date", "date", "▦", true) +
+          tool("Symbol", "symbol", "Ω", true) +
+          tool("Code", "code", "</>", true),
+      ) +
+      group(
+        "Review",
+        tool("Comment", "comment", "▤", true) +
+          tool("Bookmark", "bookmark", "⚑", true),
+      );
+  else if (tab === "layout")
+    html =
+      group(
+        "Page setup",
+        tool("A4", "a4", "▯", true) +
+          tool("Letter", "letter", "▯", true) +
+          tool("Landscape", "landscape", "▭", true) +
+          tool("Margins", "margins", "⊞", true),
+      ) +
+      group(
+        "Paragraph",
+        tool("Spacing", "spacing", "↕", true) +
+          tool("Indent", "indent", "⇥", true) +
+          tool("Outdent", "outdent", "⇤", true),
+      ) +
+      group(
+        "Layout",
+        tool("Page", "page", "▣", true) +
+          tool("Continuous", "continuous", "☷", true),
+      );
+  else if (tab === "review")
+    html =
+      group(
+        "Comments & bookmarks",
+        tool("New comment", "comment", "▤", true) +
+          tool("Show comments", "comments", "☷", true) +
+          tool("Bookmark", "bookmark", "⚑", true),
+      ) +
+      group(
+        "Review",
+        tool("Read only", "read-only", "◉", true) +
+          tool("Spell check", "spellcheck", "ABC", true) +
+          tool("Find & replace", "find", "⌕", true),
+      ) +
+      group("Statistics", tool("Document stats", "properties", "▥", true));
+  else if (tab === "view")
+    html =
+      group(
+        "Document views",
+        tool("Print layout", "page", "▣", true) +
+          tool("Continuous", "continuous", "☷", true) +
+          tool("Focus", "focus", "⛶", true),
+      ) +
+      group(
+        "Panes",
+        tool("Navigation", "navigation", "☰", true) +
+          tool("Properties", "properties", "☷", true) +
+          tool("Source", "source", "</>", true),
+      ) +
+      group(
+        "Display",
+        tool("100%", "zoom-reset", "⊙", true) +
+          tool("Theme", "theme", "◐", true),
+      );
+  else
+    html =
+      group(
+        "Document model",
+        tool("JSON", "source-json", "{}", true) +
+          tool("XAML", "source-xaml", "<>", true) +
+          tool("HTML", "source-html", "⌘", true) +
+          tool("Markdown", "source-markdown", "M↓", true),
+      ) +
+      group(
+        "Integration",
+        tool("API example", "api-example", "</>", true) +
+          tool("MVVM", "mvvm-example", "⇄", true) +
+          tool("React", "react-example", "⚛", true) +
+          tool("WebView bridge", "bridge-example", "▣", true),
+      ) +
+      group("Performance", tool("Large document", "large-document", "▥", true));
+  $("ribbon").innerHTML = html;
+  $("ribbon")
+    .querySelectorAll("[data-command]")
+    .forEach((b) => {
+      b.onmousedown = (e) => e.preventDefault();
+      b.onclick = () => run(b.dataset.command);
+    });
+  if ($("font-family"))
+    $("font-family").onchange = (e) =>
+      edit(() => editor.Engine.ApplyProperty("FontFamily", e.target.value));
+  if ($("font-size"))
+    $("font-size").onchange = (e) =>
+      edit(() =>
+        editor.Engine.ApplyProperty("FontSize", Number(e.target.value)),
+      );
+  if ($("text-color"))
+    $("text-color").oninput = (e) =>
+      edit(() => editor.Engine.ApplyProperty("Foreground", e.target.value));
+  if ($("highlight-color"))
+    $("highlight-color").oninput = (e) =>
+      edit(() => editor.Engine.ApplyProperty("Background", e.target.value));
+  update();
+}
+function showDialog(title, content, onSubmit) {
+  $("dialog-title").textContent = title;
+  $("dialog-content").innerHTML = content;
+  $("dialog-submit").textContent = "Apply";
+  $("dialog").onclose = () => {
+    if ($("dialog").returnValue === "default") safe(onSubmit);
+  };
+  $("dialog").returnValue = "cancel";
+  $("dialog").showModal();
+}
+const field = (label, id, value = "", type = "text", extra = "") =>
+  `<label class="dialog-field">${label}<input id="${id}" type="${type}" value="${esc(value)}" ${extra}></label>`;
+function makeNode(type, props = {}, children = [], text) {
+  return {
+    type,
+    id: crypto.randomUUID(),
+    props,
+    children,
+    ...(text !== undefined ? { text } : {}),
+  };
+}
+function table(rows, cols) {
+  const rowNodes = [];
+  for (let r = 0; r < rows; r++) {
+    const cells = [];
+    for (let c = 0; c < cols; c++)
+      cells.push(
+        makeNode("TableCell", r === 0 ? { Background: "#edf3fb" } : {}, [
+          makeNode("Paragraph", {}, [
+            makeNode("Run", {}, [], r === 0 ? `Column ${c + 1}` : ""),
+          ]),
+        ]),
+      );
+    rowNodes.push(makeNode("TableRow", {}, cells));
+  }
+  return makeNode("Table", {}, [makeNode("TableRowGroup", {}, rowNodes)]);
+}
+function setDocumentProp(name, value) {
+  edit(() => editor.Engine.Change(() => editor.Document.SetValue(name, value)));
+}
+function setView(mode) {
+  editor.ViewMode = mode;
+  $("view-label").textContent = mode === "page" ? "Print layout" : "Continuous";
+  $("view-toggle").innerHTML =
+    mode === "page" ? "▣ <span>Page</span>" : "☷ <span>Flow</span>";
+}
+function zoom(value) {
+  state.zoom = Math.max(50, Math.min(150, value));
+  editor.Zoom = state.zoom / 100;
+  $("zoom").value = state.zoom;
+  $("zoom-label").textContent = `${state.zoom}%`;
+}
+function openPanel(value) {
+  panel = value;
+  document.body.classList.remove("hide-inspector");
+  document
+    .querySelectorAll("[data-panel]")
+    .forEach((b) => b.classList.toggle("active", b.dataset.panel === value));
+  renderPanel();
+}
+function reviewAnnotations(kind) {
+  return editor.Engine.Annotations.filter(
+    (item) => item && item.Kind === kind && typeof item.Id === "string",
+  );
+}
+function reviewPanel() {
+  const comments = reviewAnnotations("Comment"),
+    bookmarks = reviewAnnotations("Bookmark");
+  return `<section class="inspector-section"><button class="plain-button wide" id="new-comment">+ New comment</button><p class="note">Comments follow document ranges through edits and undo. JSON saves their anchors and review state.</p><div id="comment-list">${
+    comments.length
+      ? comments
+          .map((c) => {
+            const quote = editor.Document.Text.slice(c.Start, c.End),
+              data = c.Data || {};
+            return `<div class="comment" data-annotation-id="${esc(c.Id)}"><strong>${data.Resolved ? "✓ Resolved" : esc(data.Author || "You")}</strong>${quote ? `<small>“${esc(quote.slice(0, 65))}”</small><br>` : "<small>Document position</small><br>"}${esc(data.Text)}<div><button data-comment-go="${esc(c.Id)}">Go to text</button><button data-comment-resolve="${esc(c.Id)}">${data.Resolved ? "Reopen" : "Resolve"}</button><button data-comment-delete="${esc(c.Id)}">Delete</button></div></div>`;
+          })
+          .join("")
+      : '<p class="note">No comments yet.</p>'
+  }</div></section><section class="inspector-section"><h3>Bookmarks</h3><button class="plain-button wide" id="new-bookmark">+ Add bookmark</button><div id="bookmark-list">${bookmarks.length ? bookmarks.map((b) => `<div class="comment"><strong>${esc(b.Data?.Name)}</strong><div><button data-bookmark-go="${esc(b.Id)}">Go to bookmark</button><button data-bookmark-delete="${esc(b.Id)}">Delete</button></div></div>`).join("") : '<p class="note">Save a named position or selection to return to it later.</p>'}</div></section>`;
+}
+function attachReviewHandlers() {
+  $("new-comment").onclick = addComment;
+  $("new-bookmark").onclick = addBookmark;
+  const annotation = (id) =>
+    editor.Engine.Annotations.find((item) => item.Id === id);
+  $("comment-list")
+    .querySelectorAll("[data-comment-go]")
+    .forEach(
+      (button) =>
+        (button.onclick = () =>
+          action(() => {
+            const item = annotation(button.dataset.commentGo);
+            if (item)
+              editor.Engine.Select(
+                Math.min(item.Start, editor.Document.Text.length),
+                Math.min(item.End, editor.Document.Text.length),
+              );
+          })),
+    );
+  $("comment-list")
+    .querySelectorAll("[data-comment-resolve]")
+    .forEach(
+      (button) =>
+        (button.onclick = () =>
+          edit(() => {
+            const item = annotation(button.dataset.commentResolve);
+            if (item)
+              editor.Engine.UpdateAnnotation(item.Id, {
+                Resolved: !item.Data?.Resolved,
+              });
+          })),
+    );
+  $("comment-list")
+    .querySelectorAll("[data-comment-delete]")
+    .forEach(
+      (button) =>
+        (button.onclick = () =>
+          edit(() =>
+            editor.Engine.RemoveAnnotation(button.dataset.commentDelete),
+          )),
+    );
+  $("bookmark-list")
+    .querySelectorAll("[data-bookmark-go]")
+    .forEach(
+      (button) =>
+        (button.onclick = () =>
+          action(() => {
+            const item = annotation(button.dataset.bookmarkGo);
+            if (item) editor.Engine.GoToBookmark(item.Data.Name);
+          })),
+    );
+  $("bookmark-list")
+    .querySelectorAll("[data-bookmark-delete]")
+    .forEach(
+      (button) =>
+        (button.onclick = () =>
+          edit(() =>
+            editor.Engine.RemoveAnnotation(button.dataset.bookmarkDelete),
+          )),
+    );
+}
+function run(command) {
+  safe(() => {
+    const e = editor.Engine;
+    if (mutationCommands.has(command) && !canEdit()) return;
+    if (command.startsWith("export-")) return download(command.slice(7));
+    if (command.startsWith("source-")) {
+      sourceFormat = command.slice(7);
+      return openPanel("source");
+    }
+    switch (command) {
+      case "undo":
+        e.Undo();
+        break;
+      case "redo":
+        e.Redo();
+        break;
+      case "select-all":
+        editor.SelectAll();
+        break;
+      case "bold":
+        e.ToggleFormat("FontWeight", "Bold", "Normal");
+        break;
+      case "italic":
+        e.ToggleFormat("FontStyle", "Italic", "Normal");
+        break;
+      case "underline":
+        e.ToggleFormat("TextDecorations", "Underline", "None");
+        break;
+      case "strike":
+        e.ToggleFormat("TextDecorations", "Strikethrough", "None");
+        break;
+      case "superscript":
+        e.ToggleFormat("BaselineAlignment", "Superscript", "Baseline");
+        break;
+      case "align-left":
+      case "align-center":
+      case "align-right":
+      case "align-justify":
+        e.SetParagraphProperty(
+          "TextAlignment",
+          command.slice(6).replace(/^./, (c) => c.toUpperCase()),
+        );
+        break;
+      case "normal":
+        e.SetParagraphProperty("HeadingLevel", 0);
+        e.SetParagraphProperty("FontSize", 16);
+        break;
+      case "heading1":
+        e.SetParagraphProperty("HeadingLevel", 1);
+        break;
+      case "heading2":
+        e.SetParagraphProperty("HeadingLevel", 2);
+        break;
+      case "clear-format":
+        e.Execute("ClearFormatting");
+        break;
+      case "bullets":
+        e.Execute("ToggleBullets");
+        break;
+      case "numbering":
+        e.Execute("ToggleNumbering");
+        break;
+      case "pdf-tools":
+        openPDFTools(RT, toast, editor.Document);
+        return;
+      case "new":
+        showDialog(
+          "New document",
+          '<p class="note">Your current document is saved on this device. Export a copy if you want to keep it before starting a new document.</p>',
+          () => loadTemplate("blank"),
+        );
+        return;
+      case "open":
+        $("file-input").click();
+        return;
+      case "save":
+        persist();
+        toast("Document saved on this device");
+        return;
+      case "table":
+        showDialog(
+          "Insert table",
+          field("Rows", "table-rows", "3", "number", 'min="1" max="50"') +
+            field(
+              "Columns",
+              "table-columns",
+              "3",
+              "number",
+              'min="1" max="12"',
+            ),
+          () =>
+            edit(() =>
+              e.InsertNode(
+                table(
+                  Math.max(1, Math.min(50, +$("table-rows").value)),
+                  Math.max(1, Math.min(12, +$("table-columns").value)),
+                ),
+              ),
+            ),
+        );
+        return;
+      case "table-row-before":
+        e.InsertTableRow(true);
+        break;
+      case "table-row-after":
+        e.InsertTableRow();
+        break;
+      case "table-row-delete":
+        e.DeleteTableRow();
+        break;
+      case "table-column-before":
+        e.InsertTableColumn(true);
+        break;
+      case "table-column-after":
+        e.InsertTableColumn();
+        break;
+      case "table-column-delete":
+        e.DeleteTableColumn();
+        break;
+      case "table-delete":
+        e.DeleteTable();
+        break;
+      case "link":
+        showDialog(
+          "Insert link",
+          field("Text", "link-text", editor.Selection.Text || "Link") +
+            field("URL", "link-url", "https://", "url"),
+          () =>
+            edit(() => {
+              const url = $("link-url").value;
+              if (!/^https?:\/\//i.test(url))
+                throw Error("Enter an http or https URL.");
+              e.InsertNode(
+                makeNode("Hyperlink", { NavigateUri: url }, [
+                  makeNode("Run", {}, [], $("link-text").value),
+                ]),
+              );
+            }),
+        );
+        return;
+      case "image":
+        showDialog(
+          "Insert image",
+          field("Image URL", "image-url", "", "url") +
+            field("Description", "image-alt", "") +
+            field(
+              "Width",
+              "image-width",
+              "350",
+              "number",
+              'min="20" max="700"',
+            ) +
+            '<p class="note">Use an HTTPS image URL. The description is used by assistive technology.</p>',
+          () =>
+            edit(() => {
+              const url = $("image-url").value;
+              if (!/^https:\/\//i.test(url))
+                throw Error("Use an HTTPS image URL.");
+              e.InsertNode(
+                makeNode("Image", {
+                  Source: url,
+                  AlternativeText: $("image-alt").value,
+                  Width: Math.max(20, Math.min(700, +$("image-width").value)),
+                }),
+              );
+            }),
+        );
+        return;
+      case "page-break":
+        e.SetParagraphProperty("BreakPageBefore", true);
+        break;
+      case "date":
+        e.InsertText(
+          new Intl.DateTimeFormat(undefined, { dateStyle: "long" }).format(
+            new Date(),
+          ),
+        );
+        break;
+      case "symbol":
+        showDialog(
+          "Insert symbol",
+          field("Symbol or text", "symbol-value", "©"),
+          () => edit(() => e.InsertText($("symbol-value").value)),
+        );
+        return;
+      case "code":
+        e.ApplyProperty("FontFamily", "Consolas");
+        e.ApplyProperty("Background", "#edf2f7");
+        break;
+      case "a4":
+        setDocumentProp("PageWidth", 794);
+        setDocumentProp("PageHeight", 1123);
+        openPanel("document");
+        return;
+      case "letter":
+        setDocumentProp("PageWidth", 816);
+        setDocumentProp("PageHeight", 1056);
+        openPanel("document");
+        return;
+      case "landscape": {
+        const w = editor.Document.PageWidth || 794,
+          h = editor.Document.PageHeight || 1123;
+        setDocumentProp("PageWidth", h);
+        setDocumentProp("PageHeight", w);
+        openPanel("document");
+        return;
+      }
+      case "margins":
+        showDialog(
+          "Page margins",
+          field(
+            "Margin on all sides (pixels)",
+            "margin-value",
+            "64",
+            "number",
+            'min="0" max="200"',
+          ),
+          () => setDocumentProp("PagePadding", Number($("margin-value").value)),
+        );
+        return;
+      case "spacing":
+        showDialog(
+          "Paragraph spacing",
+          field(
+            "Line height multiplier",
+            "line-height",
+            "1.6",
+            "number",
+            'step="0.1" min="1" max="3"',
+          ),
+          () =>
+            edit(() =>
+              e.SetParagraphProperty(
+                "LineHeight",
+                Number($("line-height").value),
+              ),
+            ),
+        );
+        return;
+      case "indent":
+        e.Execute("IncreaseIndentation");
+        break;
+      case "outdent":
+        e.Execute("DecreaseIndentation");
+        break;
+      case "page":
+        setView("page");
+        return;
+      case "continuous":
+        setView("continuous");
+        return;
+      case "focus":
+        document.body.classList.toggle("focus");
+        return;
+      case "navigation":
+        document.body.classList.toggle("hide-navigation");
+        return;
+      case "properties":
+        openPanel("document");
+        return;
+      case "source":
+        openPanel("source");
+        return;
+      case "comments":
+        openPanel("comments");
+        return;
+      case "comment":
+        addComment();
+        return;
+      case "bookmark":
+        addBookmark();
+        return;
+      case "read-only":
+        editor.IsReadOnly = !editor.IsReadOnly;
+        toast(editor.IsReadOnly ? "Read-only mode enabled" : "Editing enabled");
+        break;
+      case "spellcheck":
+        editor.setAttribute(
+          "spellcheck",
+          editor.getAttribute("spellcheck") === "false" ? "true" : "false",
+        );
+        toast("Browser spell checking toggled");
+        return;
+      case "find":
+        document.body.classList.remove("hide-navigation");
+        $("find-tools").hidden = false;
+        $("find-input").focus();
+        return;
+      case "zoom-reset":
+        zoom(100);
+        return;
+      case "theme":
+        toggleTheme();
+        return;
+      case "print":
+        printDocument();
+        return;
+      case "large-document": {
+        const d = new RT.FlowDocument();
+        d.BeginChange();
+        for (let i = 0; i < 500; i++) {
+          const p = new RT.Paragraph(
+            new RT.Run(
+              `Paragraph ${i + 1}. A reusable text engine keeps the document model independent from any particular editing surface. Search, select, format, and inspect this large document.`,
+            ),
+          );
+          if (i % 50 === 0) p.HeadingLevel = 2;
+          d.Blocks.Add(p);
+        }
+        d.EndChange();
+        editor.Document = d;
+        $("document-title").value = "Large document · 500 paragraphs";
+        changed();
+        toast("Created 500 paragraphs");
+        return;
+      }
+      case "api-example":
+      case "mvvm-example":
+      case "react-example":
+      case "bridge-example":
+        showCode(command);
+        return;
+    }
+    editor.Focus();
+    update();
+  });
+}
+function renderPanel() {
+  const labels = {
+    document: "Document",
+    comments: "Comments",
+    source: "Source",
+    export: "Export document",
+  };
+  $("inspector-title").textContent = labels[panel];
+  let html = "";
+  if (panel === "document")
+    html = `<section class="inspector-section"><h3>Page setup</h3><div class="paper-mini" aria-hidden="true">${"<i></i>".repeat(10)}</div><label class="field">Paper size<select id="paper-size"><option value="a4">A4 · 210 × 297 mm</option><option value="letter">Letter · 8.5 × 11 in</option></select></label><label class="field">Orientation<select id="orientation"><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label><label class="field">Margins<select id="margins-select"><option value="64">Normal · 64 px</option><option value="32">Narrow · 32 px</option><option value="96">Wide · 96 px</option></select></label></section><section class="inspector-section"><h3>Document details</h3><div class="property-row"><span>Format</span><strong>Flow document</strong></div><div class="property-row"><span>Paragraphs</span><strong id="stat-paragraphs"></strong></div><div class="property-row"><span>Characters</span><strong id="stat-characters"></strong></div><div class="property-row"><span>Revision</span><strong id="stat-revision"></strong></div></section><section class="inspector-section"><h3>Make it yours</h3><p class="note">Select text to apply formatting. Use heading styles to organize your ideas.</p><p class="note"><span class="help-key">Ctrl B</span> Bold &nbsp; <span class="help-key">Ctrl I</span> Italic</p><button class="plain-button wide" id="panel-export">Export document ↗</button></section>`;
+  if (panel === "comments") html = reviewPanel();
+  if (panel === "source")
+    html = `<section class="inspector-section"><p class="note">Edit the source and apply it to the shared document model.</p><div class="source-buttons"><select id="source-format"><option value="markdown">Markdown</option><option value="html">HTML</option><option value="json">JSON</option><option value="xaml">XAML</option><option value="rtf">RTF</option></select><button id="apply-source">Apply</button></div><textarea id="source-code" class="code-area" aria-label="Document source" spellcheck="false"></textarea><button id="refresh-source" class="plain-button wide">Refresh from document</button><p class="note">JSON preserves the engine model. Other formats preserve their supported features; see format documentation.</p></section>`;
+  if (panel === "export")
+    html = `<section class="inspector-section"><h3>Choose a format</h3>${[
+      ["docx", "Word document", ".docx"],
+      ["pdf", "PDF document", ".pdf"],
+      ["markdown", "Markdown", ".md"],
+      ["html", "Web document", ".html"],
+      ["rtf", "Rich text", ".rtf"],
+      ["xaml", "Flow document XAML", ".xaml"],
+      ["json", "Document model", ".json"],
+      ["text", "Plain text", ".txt"],
+    ]
+      .map(
+        ([f, n, e]) =>
+          `<button class="export-item" data-export="${f}">${n}<span>${e} ↓</span></button>`,
+      )
+      .join(
+        "",
+      )}<p class="note">Exports use the features supported by each format. PDF uses a separate layout exporter; it is not a pixel-identical print layout.</p><button class="plain-button wide" id="browser-print">Browser print / PDF</button></section>`;
+  $("inspector-content").innerHTML = html;
+  if (panel === "document") {
+    updateStats();
+    $("paper-size").onchange = (e) => run(e.target.value);
+    $("orientation").onchange = () => run("landscape");
+    $("margins-select").onchange = (e) =>
+      setDocumentProp("PagePadding", +e.target.value);
+    $("panel-export").onclick = () => openPanel("export");
+  }
+  if (panel === "source") {
+    $("source-format").value = sourceFormat;
+    $("source-format").onchange = (e) => {
+      sourceFormat = e.target.value;
+      refreshSource();
+    };
+    $("apply-source").onclick = () =>
+      edit(() => {
+        const s = $("source-code").value;
+        const document =
+          sourceFormat === "json"
+            ? RT.FlowDocument.FromJSON(JSON.parse(s))
+            : {
+                markdown: RT.fromMarkdown,
+                html: RT.fromHTML,
+                xaml: RT.fromXAML,
+                rtf: RT.fromRTF,
+              }[sourceFormat](s);
+        editor.Engine.ReplaceDocument(document);
+        toast("Source applied");
+      });
+    $("refresh-source").onclick = refreshSource;
+    refreshSource();
+  }
+  if (panel === "export") {
+    $("inspector-content")
+      .querySelectorAll("[data-export]")
+      .forEach(
+        (b) => (b.onclick = () => safe(() => download(b.dataset.export))),
+      );
+    $("browser-print").onclick = printDocument;
+  }
+  if (panel === "comments") attachReviewHandlers();
+  updateReadOnlyControls();
+}
+function refreshSource() {
+  safe(() => {
+    $("source-code").value =
+      sourceFormat === "json"
+        ? JSON.stringify(editor.Document.ToJSON(), null, 2)
+        : {
+            markdown: RT.toMarkdown,
+            html: RT.toHTML,
+            xaml: RT.toXAML,
+            rtf: RT.toRTF,
+          }[sourceFormat](editor.Document);
+  });
+}
+function addComment() {
+  if (!canEdit()) return;
+  const engine = editor.Engine,
+    document = editor.Document,
+    start = editor.Selection.Start.Offset,
+    end = editor.Selection.End.Offset,
+    quote = editor.Selection.Text;
+  showDialog(
+    "Add comment",
+    `<p class="note">${quote ? `Selected: “${esc(quote.slice(0, 150))}”` : "Document comment"}</p><label class="dialog-field">Comment<textarea id="comment-text" required placeholder="Add your thoughts…"></textarea></label>`,
+    () =>
+      edit(() => {
+        const text = $("comment-text").value.trim();
+        if (!text) return;
+        if (editor.Document !== document)
+          throw Error(
+            "The document changed while the comment dialog was open.",
+          );
+        engine.Select(start, end);
+        engine.AddComment(text, "You");
+        openPanel("comments");
+      }),
+  );
+}
+function addBookmark() {
+  if (!canEdit()) return;
+  const engine = editor.Engine,
+    document = editor.Document,
+    start = editor.Selection.Start.Offset,
+    end = editor.Selection.End.Offset;
+  showDialog(
+    "Add bookmark",
+    field(
+      "Bookmark name",
+      "bookmark-name",
+      "",
+      "text",
+      'required maxlength="120"',
+    ),
+    () =>
+      edit(() => {
+        if (editor.Document !== document)
+          throw Error(
+            "The document changed while the bookmark dialog was open.",
+          );
+        engine.Select(start, end);
+        engine.AddBookmark($("bookmark-name").value.trim());
+        openPanel("comments");
+      }),
+  );
+}
+async function download(format) {
+  const fn = {
+    docx: RT.toDOCX,
+    pdf: RT.toPDF,
+    markdown: RT.toMarkdown,
+    html: RT.toHTML,
+    rtf: RT.toRTF,
+    xaml: RT.toXAML,
+    text: RT.toText,
+  };
+  let data =
+    format === "json"
+      ? JSON.stringify(editor.Document.ToJSON(), null, 2)
+      : await fn[format](editor.Document);
+  const ext = { markdown: "md", text: "txt" }[format] || format;
+  const mime =
+    {
+      pdf: "application/pdf",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      html: "text/html",
+      json: "application/json",
+      rtf: "application/rtf",
+    }[format] || "text/plain";
+  const blob = new Blob([data], { type: mime });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download =
+    ($("document-title").value || "document").replace(
+      /[^\p{L}\p{N} _-]/gu,
+      "",
+    ) +
+    "." +
+    ext;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  toast(`Exported ${ext.toUpperCase()} document`);
+}
+function printDocument() {
+  const w = window.open("", "_blank");
+  if (!w) {
+    toast("Allow popups to open print preview.");
+    return;
+  }
+  w.document.write(
+    `<!doctype html><html><head><title>${esc($("document-title").value)}</title><style>body{font:16px/1.6 'Segoe UI',sans-serif;max-width:700px;margin:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid #cbd5e1;padding:8px}img{max-width:100%}@page{margin:20mm}h1,h2,h3{break-after:avoid}</style></head><body>${RT.toHTML(editor.Document)}</body></html>`,
+  );
+  w.document.close();
+  if (w.document.readyState === "complete") w.print();
+  else w.addEventListener("load", () => w.print(), { once: true });
+}
+function find() {
+  const q = $("find-input").value;
+  $("find-tools").hidden = !q;
+  currentMatches = q ? editor.Engine.Find(q, { matchCase: false }) : [];
+  matchIndex = 0;
+  $("find-count").textContent = `${currentMatches.length} matches`;
+}
+function nextMatch() {
+  if (!currentMatches.length) return;
+  const m = currentMatches[matchIndex++ % currentMatches.length];
+  const start = m.Start?.Offset ?? m.start ?? m.Start ?? m.offset ?? 0;
+  const end =
+    m.End?.Offset ?? m.end ?? m.End ?? start + $("find-input").value.length;
+  action(() => editor.Engine.Select(start, end));
+  $("find-count").textContent =
+    `${((matchIndex - 1) % currentMatches.length) + 1} of ${currentMatches.length}`;
+}
+function toggleTheme() {
+  document.body.classList.toggle("dark");
+  localStorage.setItem(
+    "richtextweb-theme",
+    document.body.classList.contains("dark") ? "dark" : "light",
+  );
+}
+function showCode(kind) {
+  const codes = {
+    "api-example": `import { FlowDocument, Paragraph, Run, Bold }\n  from '@wieslawsoltes/richtextweb';\n\nconst flowDocument = new FlowDocument();\nconst paragraph = new Paragraph();\nparagraph.Inlines.Add(new Run('Hello '));\nparagraph.Inlines.Add(new Bold(new Run('world')));\nflowDocument.Blocks.Add(paragraph);\n\nconst editor = document.querySelector('rich-text-box');\neditor.Document = flowDocument;`,
+    "mvvm-example": `import { ObservableObject, Binding, BindingMode,\n  RelayCommand } from '@wieslawsoltes/richtextweb/mvvm';\n\nconst editor = document.querySelector('rich-text-box');\nconst vm = new ObservableObject({ Document: editor.Document });\nconst binding = new Binding({\n  Source: vm, Path: 'Document', Mode: BindingMode.TwoWay\n}).Attach(editor, 'Document');\n\nconst bold = new RelayCommand(() => editor.Execute('ToggleBold'));\nbold.Execute();\n// When the view closes: binding.Dispose(); bold.Dispose();`,
+    "react-example": `import { RichTextEditor }\n  from '@wieslawsoltes/richtextweb/react';\n\n<RichTextEditor\n  document={flowDocument}\n  onDocumentChange={setFlowDocument}\n  readOnly={false}\n/>`,
+    "bridge-example": `import { connectWebView2 }\n  from '@wieslawsoltes/richtextweb/bridge';\n\n// Run inside the trusted WPF or WinUI WebView2 host page.\nconst editor = document.querySelector('rich-text-box');\nconst bridge = connectWebView2(editor.Engine, window.chrome.webview, {\n  isReadOnly: () => editor.IsReadOnly,\n  includeDocumentInEvents: true\n});\n\n// C# host uses RichTextDocumentClient from adapters/dotnet:\n// await client.InsertTextAsync("Hello from .NET");\n// await client.ExecuteAsync("ToggleBold");\n// On close: bridge.Dispose();`,
+  };
+  showDialog(
+    "Integration example",
+    `<textarea class="code-area" readonly aria-label="Integration code">${esc(codes[kind])}</textarea><p class="note"><a href="https://github.com/wieslawsoltes/RichTextWeb/blob/main/docs/INTEGRATION.md" target="_blank" rel="noreferrer">Read integration documentation ↗</a></p>`,
+    () => {},
+  );
+  $("dialog-submit").textContent = "Done";
+}
+document.querySelectorAll("[data-tab]").forEach(
+  (b) =>
+    (b.onclick = () => {
+      tab = b.dataset.tab;
+      document.querySelectorAll("[data-tab]").forEach((t) => {
+        t.classList.toggle("active", t === b);
+        t.setAttribute("aria-selected", String(t === b));
+      });
+      renderRibbon();
+    }),
+);
+document.querySelectorAll("[data-side]").forEach(
+  (b) =>
+    (b.onclick = () => {
+      document
+        .querySelectorAll("[data-side]")
+        .forEach((t) => t.classList.toggle("active", t === b));
+      $("outline").hidden = b.dataset.side !== "outline";
+      $("examples").hidden = b.dataset.side !== "examples";
+    }),
+);
+document
+  .querySelectorAll("[data-panel]")
+  .forEach((b) => (b.onclick = () => openPanel(b.dataset.panel)));
+$("examples").innerHTML = Object.entries(templates)
+  .map(
+    ([key, t]) =>
+      `<button class="example-card" data-example="${key}"><strong>${esc(t.name)}</strong><span>${esc(t.description)}</span></button>`,
+  )
+  .join("");
+$("examples")
+  .querySelectorAll("button")
+  .forEach((b) => (b.onclick = () => loadTemplate(b.dataset.example)));
+$("theme-toggle").onclick = toggleTheme;
+$("focus-mode").onclick = () => run("focus");
+$("toggle-navigation").onclick = () => run("navigation");
+$("show-navigation").onclick = () => run("navigation");
+$("toggle-inspector").onclick = () =>
+  document.body.classList.add("hide-inspector");
+$("export-primary").onclick = () => openPanel("export");
+$("zoom").oninput = (e) => zoom(+e.target.value);
+$("zoom-out").onclick = () => zoom(state.zoom - 10);
+$("zoom-in").onclick = () => zoom(state.zoom + 10);
+$("view-toggle").onclick = () =>
+  setView(editor.ViewMode === "page" ? "continuous" : "page");
+$("document-title").onchange = persist;
+$("find-input").oninput = find;
+$("find-input").onkeydown = (e) => {
+  if (e.key === "Enter") nextMatch();
+};
+$("find-next").onclick = nextMatch;
+$("replace-all").onclick = () =>
+  edit(() => {
+    const count = editor.Engine.ReplaceAll(
+      $("find-input").value,
+      $("replace-input").value,
+      { matchCase: false },
+    );
+    find();
+    toast(`Replaced ${count} matches`);
+  });
+$("file-input").onchange = () =>
+  safe(async () => {
+    if (!canEdit()) {
+      $("file-input").value = "";
+      return;
+    }
+    const file = $("file-input").files[0];
+    if (!file) return;
+    if (file.size > 25 * 1024 * 1024)
+      throw Error("Choose a document smaller than 25 MB.");
+    const ext = file.name.split(".").pop().toLowerCase();
+    let doc;
+    if (ext === "docx")
+      doc = await RT.fromDOCX(new Uint8Array(await file.arrayBuffer()));
+    else {
+      const text = await file.text();
+      const fn = {
+        html: RT.fromHTML,
+        htm: RT.fromHTML,
+        md: RT.fromMarkdown,
+        markdown: RT.fromMarkdown,
+        xaml: RT.fromXAML,
+        rtf: RT.fromRTF,
+        txt: RT.fromText,
+      };
+      doc =
+        ext === "json"
+          ? RT.FlowDocument.FromJSON(JSON.parse(text))
+          : fn[ext]?.(text);
+      if (!doc) throw Error("Unsupported document format");
+    }
+    if (!canEdit()) {
+      $("file-input").value = "";
+      return;
+    }
+    editor.Document = doc;
+    $("document-title").value = file.name.replace(/\.[^.]+$/, "");
+    changed();
+    toast("Document imported");
+    $("file-input").value = "";
+  });
+editor.addEventListener("documentchange", changed);
+editor.addEventListener("selectionchange", update);
+editor.addEventListener("commandstatechange", update);
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    e.preventDefault();
+    persist();
+    toast("Document saved");
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    run("find");
+  }
+  if (e.key === "Escape") document.body.classList.remove("focus");
+});
+try {
+  const stored = JSON.parse(localStorage.getItem("richtextweb-document"));
+  if (stored?.document) {
+    editor.Document = RT.FlowDocument.FromJSON(stored.document);
+    $("document-title").value = stored.title || state.title;
+    if (Array.isArray(stored.comments) && !editor.Engine.Annotations.length) {
+      editor.Engine.Change(() => {
+        for (const comment of stored.comments)
+          editor.Engine.AddAnnotation(
+            "Comment",
+            {
+              Text: comment.text || "",
+              Author: "You",
+              Resolved: !!comment.resolved,
+              LegacyQuote: comment.quote || "",
+            },
+            0,
+            0,
+          );
+      });
+      editor.Engine.ClearUndo();
+    }
+  } else editor.Document = RT.fromHTML(templates.welcome.html);
+  if (localStorage.getItem("richtextweb-theme") === "dark")
+    document.body.classList.add("dark");
+} catch {
+  editor.Document = RT.fromHTML(templates.welcome.html);
+}
+setView("page");
+zoom(100);
+renderRibbon();
+renderPanel();
+update();
+window.richTextStudio = { editor, RT, loadTemplate, download, run };

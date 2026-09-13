@@ -1,0 +1,178 @@
+# Application integration
+
+RichTextWeb shares one JavaScript `FlowDocument` model and editing engine across its custom element, React adapter, MVVM bindings and native WebView hosts. The PascalCase APIs ease migration from .NET code. WPF/WinUI/Avalonia integration runs this same engine inside a WebView; it is not a separate native text layout implementation or a binary-compatible replacement for the framework controls.
+
+## Web component
+
+```ts
+import {
+  FlowDocument,
+  Paragraph,
+  Run,
+  registerRichTextWeb,
+} from "@wieslawsoltes/richtextweb";
+registerRichTextWeb();
+const editor = document.createElement("rich-text-box");
+editor.Document = new FlowDocument(
+  new Paragraph(new Run("Hello from a shared model")),
+);
+editor.addEventListener("documentchange", (event) => {
+  console.log(editor.Document.Revision, editor.Document.Text);
+});
+document.body.append(editor);
+editor.Engine.Select(0, 5);
+editor.Execute("ToggleBold");
+```
+
+The root package, `./core`, `./web`, `./mvvm`, `./formats` and `./bridge` do not require React. Custom element properties receive objects directly; do not serialize document objects into HTML attributes. In Vue use a DOM property binding (`:Document.prop="document"`) and register `rich-text-box` as a custom element in the compiler. In Angular enable `CUSTOM_ELEMENTS_SCHEMA` and use `[Document]="document"`. Both use the native `documentchange` event. Other frameworks can assign the element's `.Document` and subscribe with `addEventListener`.
+
+## MVVM
+
+```ts
+import {
+  ObservableObject,
+  Binding,
+  BindingMode,
+  RelayCommand,
+  BindCommand,
+  CompositeDisposable,
+  FlowDocument,
+  Paragraph,
+  Run,
+} from "@wieslawsoltes/richtextweb";
+
+class EditorViewModel extends ObservableObject {
+  constructor() {
+    super();
+    this.Document = new FlowDocument(new Paragraph(new Run("Edit me")));
+  }
+  get Document() {
+    return this.GetProperty<FlowDocument>("Document");
+  }
+  set Document(value: FlowDocument) {
+    this.SetProperty("Document", value);
+  }
+}
+
+const vm = new EditorViewModel();
+const lifetime = new CompositeDisposable();
+lifetime.Add(
+  new Binding({
+    Source: vm,
+    Path: "Document",
+    Mode: BindingMode.TwoWay,
+  }).Attach(editor, "Document"),
+);
+const undo = lifetime.Add(
+  new RelayCommand(
+    () => editor.Undo(),
+    () => editor.Engine.CanUndo,
+  ),
+);
+lifetime.Add(BindCommand(document.querySelector("#undo")!, undo));
+const changed = () => undo.NotifyCanExecuteChanged();
+editor.addEventListener("commandstatechange", changed);
+// On unmount: remove the commandstatechange listener and call lifetime.Dispose().
+```
+
+`ObservableObject` supports conventional accessors as above and `new ObservableObject({ Title: 'Untitled' })` for dynamically defined properties. `PropertyChanged.Subscribe` returns an `IDisposable`. Nested binding paths subscribe to observable intermediate objects and reconnect when any parent changes. Dispose bindings when their views are removed.
+
+| Binding mode     | Initial transfer | Subsequent transfers                             |
+| ---------------- | ---------------- | ------------------------------------------------ |
+| `OneWay`         | Source → target  | Source changes                                   |
+| `TwoWay`         | Source → target  | Source changes and target event/property changes |
+| `OneTime`        | Source → target  | None                                             |
+| `OneWayToSource` | Target → source  | Target changes                                   |
+
+`IValueConverter` implements `Convert` and, for two-way changes, `ConvertBack`. `UpdateSourceEvent` chooses the DOM event; `Document` defaults to `documentchange`, other properties to `change`. Plain objects can call `BindingExpression.UpdateSource()` explicitly. These bindings do not reproduce WPF XAML binding markup, dependency-property precedence or validation rules.
+
+`RelayCommand` supports `CanExecute`, `CanExecuteChanged`, `NotifyCanExecuteChanged` and disposal. `AsyncRelayCommand` exposes `IsRunning`, `Error`, `ExecutionTask` and `Cancel()` with an `AbortSignal`; it prevents overlapping execution. Its returned promise rejects on failure. `BindCommand` routes failures to a supplied callback or the bubbling `commanderror` event. `CompositeDisposable` disposes every child even if one cleanup throws.
+
+## React 18 and 19
+
+```tsx
+import { useRef } from "react";
+import {
+  FlowDocument,
+  Paragraph,
+  Run,
+  RichTextBox,
+} from "@wieslawsoltes/richtextweb";
+import {
+  RichTextEditor,
+  useFlowDocument,
+} from "@wieslawsoltes/richtextweb/react";
+
+export function Editor() {
+  const document = useFlowDocument(
+    () => new FlowDocument(new Paragraph(new Run("React document"))),
+  );
+  const editor = useRef<RichTextBox>(null);
+  return (
+    <>
+      <button onClick={() => editor.current?.Execute("ToggleBold")}>
+        Bold
+      </button>
+      <RichTextEditor
+        ref={editor}
+        document={document}
+        viewMode="page"
+        zoom={1}
+        aria-label="Document editor"
+        style={{ height: 600 }}
+        onDocumentChange={(doc) => console.log(doc.Revision)}
+      />
+      <output>{document.Text.length} UTF-16 code units</output>
+    </>
+  );
+}
+```
+
+`document` is a shared mutable model. Mutations already update every subscribed control; replacing the prop's identity assigns a new document. `defaultDocument` is applied once for an uncontrolled editor. `onDocumentChange` reports control changes and avoids echoing a document assignment performed by the React adapter. `onSelectionChange`, `onCommandStateChange`, `onReady`, `readOnly`, `acceptsTab`, `zoom`, `viewMode`, native HTML attributes and forwarded control refs are supported. Event listeners detach when the component unmounts.
+
+`useDocumentRevision(document)` reads a stable revision snapshot through React's external-store API. `useFlowDocument` creates a model once and subscribes to revisions. `useObservableProperty` connects a single MVVM property; replace object values to notify React of object changes. Server rendering produces the custom-element shell; editable layout initializes in the browser. See the [React external store documentation](https://react.dev/reference/react/useSyncExternalStore) for snapshot and hydration behavior.
+
+## Native hosts and bridge protocol
+
+See [`adapters/dotnet/README.md`](../adapters/dotnet/README.md) for the reusable C# request client, WebView2 transports, WPF and WinUI helpers, Avalonia transport, and a ready-to-host editor page. The C# APIs are asynchronous because the JavaScript engine lives in another runtime. They provide `INotifyPropertyChanged` for revision, undo/redo state and document snapshots, plus correlated requests, timeouts, cancellation, validated JSON envelopes and deterministic disposal.
+
+```ts
+import { connectWebView2 } from "@wieslawsoltes/richtextweb/bridge";
+const bridge = connectWebView2(editor.Engine, window.chrome.webview, {
+  isReadOnly: () => editor.IsReadOnly,
+  includeDocumentInEvents: true,
+});
+// Dispose when the host closes. The supplied engine remains owned by the editor.
+```
+
+The WebView2 API exchanges structured messages with its dedicated `chrome.webview` channel. The adapter does not register a general window `message` listener. Native hosts restrict top-level navigation and validate message sources. This follows the [WebView2 messaging guidance](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/communicate-btwn-web-native). Avalonia hosts use `connectScriptHost`, `NativeWebView.InvokeScript` and `invokeCSharpAction`, described in the [Avalonia WebView documentation](https://docs.avaloniaui.net/controls/web/nativewebview).
+
+Request example:
+
+```json
+{
+  "channel": "richtextweb",
+  "version": 1,
+  "kind": "request",
+  "id": "42",
+  "method": "insertText",
+  "params": { "text": "Hello", "expectedRevision": 7 }
+}
+```
+
+Responses echo the `id` and contain `result` or `{ "error": { "code": "...", "message": "..." } }`. Events use `kind: "event"`, `event` and `payload`. `ready`/`documentChanged` carry revision, text length, undo/redo, read-only and selection state. `selectionChanged` carries start/end offsets and selected text. Full document change payloads are opt-in to avoid serializing a document for every edit.
+
+| Method                                            | Parameters                                             |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| `getDocument`, `getText`, `getState`              | None                                                   |
+| `setDocument`                                     | `document` canonical JSON; optional `expectedRevision` |
+| `select`                                          | `start`, `end` UTF-16 offsets                          |
+| `insertText`                                      | `text`; optional `expectedRevision`                    |
+| `insertNode`                                      | `node` canonical JSON                                  |
+| `deleteBackward`, `deleteForward`, `undo`, `redo` | Optional `expectedRevision`                            |
+| `applyProperty`, `setParagraphProperty`           | `name`, `value`                                        |
+| `execute`                                         | `command`, optional `parameter`                        |
+
+All mutating methods accept optional `expectedRevision`; mismatch returns `revision_conflict`. Invalid documents, duplicate node IDs, unsupported node types, invalid offsets, excessive message size/depth, prototype keys, cycles and non-JSON values are rejected. The default input limit is 8 Mi UTF-16 code units, 100,000 document nodes and depth 64. `isReadOnly` is evaluated for each mutation. `HandleMessage` returns the response, while `Receive` also posts it. Invalid-envelope errors have `id: null`. Transport failures notify `TransportError`.
+
+These adapters are a migration surface for the implemented engine. They do not supply arbitrary native WPF controls inside document UI containers, native text services, a full Word object model, or native framework rendering. The shipped C# sources require compilation and platform testing in the application's target environment; that qualification was not performed in this Linux workspace.
