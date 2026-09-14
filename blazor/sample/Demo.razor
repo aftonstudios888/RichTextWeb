@@ -1,0 +1,67 @@
+@page "/"
+@namespace RichTextWebBlazorSample
+@using RichTextWeb.Blazor
+@using Microsoft.AspNetCore.Components
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.JSInterop
+@using System.ComponentModel.DataAnnotations
+<main>
+    <h1>RichTextWeb + Blazor</h1>
+    <p>Native paginated WYSIWYG editing, EditForm validation, two-way HTML binding, document export and a local PDF workspace.</p>
+    <button id="action" @onclick="Exercise" disabled="@(!_ready)">Edit, validate binding, export DOCX/PDF and search PDF</button>
+    <button @onclick="ToggleTheme">Switch theme</button>
+    <button id="toggle" @onclick="Toggle">@(_show ? "Unmount" : "Mount")</button>
+    @if (_show) {
+        <EditForm EditContext="_context" OnSubmit="Submit" FormName="richtext">
+            <DataAnnotationsValidator />
+            <RichTextInput @ref="_input" @bind-Value="_model.Body" ControlKind="pageEditor" Theme="_theme" Ready="EditorReady" AriaLabel="Document body" />
+            <ValidationMessage For="@(() => _model.Body)" />
+            <button type="submit">Validate document</button>
+        </EditForm>
+        <h2>Read-only flow viewer</h2>
+        <FlowDocumentScrollViewer Value="_model.Body" Theme="_theme" Style="display:block;height:160px" AriaLabel="Document preview" />
+        <h2>Native PDF workspace</h2>
+        <PdfEditor @ref="_pdf" Theme="_theme" Ready="PdfReady" Style="display:block;height:500px" />
+    }
+    <output id="status">@_status</output><output id="result">@_result</output><p>@_details</p>
+    <InteropProbe />
+</main>
+@code {
+    public sealed class DocumentForm { [Required] public string? Body { get; set; } = "<p>Hello from Blazor.</p>"; }
+    private readonly DocumentForm _model = new();
+    private EditContext _context = default!;
+    private RichTextInput _input = default!;
+    private PdfEditor _pdf = default!;
+    private bool _show = true, _editorReady, _pdfReady, _ready;
+    private string _theme = "light", _status = "Loading", _result = "", _details = "";
+    protected override void OnInitialized() => _context = new EditContext(_model);
+    private void EditorReady(IJSObjectReference _) { _editorReady = true; CheckReady(); }
+    private void PdfReady(IJSObjectReference _) { _pdfReady = true; CheckReady(); }
+    private void CheckReady() { _ready = _editorReady && _pdfReady; if (_ready) _status = "Ready"; }
+    private async Task Submit() { await _input.FlushAsync(); _details = _context.Validate() ? "The EditForm document is valid." : "Document validation failed."; }
+    private async Task Exercise()
+    {
+        var editor = _input.Editor!;
+        await editor.AppendTextAsync(" Verified"); await _input.FlushAsync();
+        if (!_model.Body!.Contains("Verified") || !_context.IsModified(new FieldIdentifier(_model, nameof(DocumentForm.Body)))) throw new InvalidOperationException("Two-way binding or EditContext field notification failed.");
+        var layout = await editor.RepaginateAsync();
+        if (layout.PageCount < 1) throw new InvalidOperationException("Native page measurement failed.");
+        var docx = await editor.ExportBytesAsync("docx");
+        if (docx.Length < 100 || docx[0] != 80 || docx[1] != 75) throw new InvalidOperationException("Native DOCX export failed.");
+        var pdf = await editor.ExportBytesAsync("pdf");
+        if (pdf.Length < 100 || System.Text.Encoding.ASCII.GetString(pdf, 0, 4) != "%PDF") throw new InvalidOperationException("Native PDF export failed.");
+        await _pdf.LoadAsync(pdf);
+        var info = await _pdf.GetInfoAsync();
+        var matches = await _pdf.FindAsync("Verified");
+        var saved = await _pdf.SaveAsync();
+        if (info.PageCount < 1 || matches.Length < 1 || saved.Length < 100) throw new InvalidOperationException("Native PDF loading, search or save failed.");
+        await _pdf.SetViewModeAsync("flow");
+        if ((await _pdf.GetInfoAsync()).ViewMode != "flow") throw new InvalidOperationException("PDF flow view did not initialize.");
+        await _pdf.SetViewModeAsync("pdf");
+        if ((await _pdf.GetInfoAsync()).ViewMode != "pdf") throw new InvalidOperationException("PDF source view did not restore.");
+        _details = $"Measured {layout.PageCount} page(s), exported {docx.Length:N0}-byte DOCX and {pdf.Length:N0}-byte PDF, and found {matches.Length} PDF text match(es).";
+        _result = "Passed";
+    }
+    private void ToggleTheme() => _theme = _theme == "light" ? "dark" : "light";
+    private void Toggle() { _show = !_show; _ready = _editorReady = _pdfReady = false; _status = _show ? "Loading" : "Unmounted"; _result = ""; }
+}
