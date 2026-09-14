@@ -1,11 +1,7 @@
-# RichTextWeb.Blazor 0.4.1
+# RichTextWeb.Blazor 0.4.2
 
-Updates the pinned shared runtime to tested Dockyard revision `1c895b7184451071e1c7131063249d2d9eb145b9`, with no Dockyard runtime dependency.
+Adopts merged and validated shared runtime c833be49d472583b6f56225862e0aa7d201c1da7 from Dockyard PR #5. Fixes concurrent visual teardown, late template imports/creation, callbacks queued before removal and retained cleanup failures. Adds IsReady/IsDisposed, awaitable Razor factory disposal and coalesced parameter updates.
 
-- Preserve cyclic/deep native arguments and shared callback identity without mutating inputs.
-- Await concurrent native/module/subscription cleanup and asynchronous unsubscribe, continuing teardown after individual failures.
-- Preserve property/method/disposal access through callable references and add `CallFunctionJsonAsync<T>` for complete streamed results.
-- Honor initialization-wait cancellation independently for each caller and prevent late native work after disposal.
-- Exercise expanded shared JavaScript and managed regressions in both package-consumer matrices.
+Built on current main f363b825282346367224d357d06f31235e20ebf5, retaining the recently merged native pagination and structural equation changes. Rich-text/page editors, read-only viewers, toolbar, revision-aware binding, InputBase/EditForm, format services and PDF source/flow controls remain intact.
 
-Rich-text/page editors, read-only viewers, native toolbar, revision-aware two-way binding, InputBase/EditForm, document formats, native PDF source/flow modes and full-value streaming remain available. .NET 8/.NET 10 WebAssembly/Server tests verify EditForm modifications, pagination, DOCX/PDF output, PDF search/view transitions and remounting before publication. Public NuGet payloads are verified before creating the release. Native document/pagination/PDF/collaboration limits remain unchanged; no fonts are implicitly downloaded.
+Both .NET 8/.NET 10 actual-package WebAssembly/Server matrices test EditForm notifications, full values, pagination, DOCX/PDF output, PDF transitions, native callbacks and remounting. New managed/JavaScript lifetime regressions and template movement/update/recreation are added. Publication verifies public NuGet payloads before creating package/symbol/sample releases. Underlying native compatibility boundaries remain applicable; no fonts or runtime Dockyard dependency are added.

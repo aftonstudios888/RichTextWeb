@@ -1,6 +1,6 @@
 # RichTextWeb.Blazor
 
-Install `RichTextWeb.Blazor` 0.4.1 for .NET 8/.NET 10. The package includes the actual native browser editor/format/PDF engine and local PDF worker/decoders/maps/profiles. Fonts are not distributed or implicitly downloaded.
+Install `RichTextWeb.Blazor` 0.4.2 for .NET 8/.NET 10. The package includes the actual native browser editor/format/PDF engine and local PDF worker/decoders/maps/profiles. Fonts are not distributed or implicitly downloaded.
 
 ## Editing and binding
 
@@ -26,3 +26,7 @@ RichTextInput derives from InputBase and integrates ValueExpression, EditContext
 PdfEditor exposes source loading, saving, search, page operations, history, fit, native editor access through generic interop, reconstruction to flow and reflow export. `SetViewModeAsync("flow")` initializes reconstructed content before switching; `SetViewModeAsync("pdf")` restores the source view. The ViewMode parameter uses the same path. SourceRevision signals intentional byte-source updates. PDF source edits and reconstructed flow are separate representations; Save preserves source edits, ExportReflow emits the reconstructed document. A visual cover is not secure redaction. Original PDF-text editing is limited by the native engine's supported operators/fonts.
 
 The [sample](sample/Demo.razor) checks real EditForm modifications, pagination, DOCX/PDF output, PDF search/save and both PDF view transitions. Read [INTEGRATION.md](INTEGRATION.md) for hosting, streaming, callbacks, ownership and release processes.
+
+## Lifecycle in 0.4.2
+
+Editor/viewer controls expose `IsReady` and `IsDisposed`. Concurrent disposal awaits a shared native cleanup fence, releases handles after errors and retains failures. Callbacks queued before removal are suppressed. Shared Razor factories now have awaitable teardown, late-import/root-creation cleanup and coalesced updates. The package-restored samples exercise template movement, context updates and recreation in WebAssembly and Server. Existing revision-aware document binding and format/PDF behavior are preserved.
