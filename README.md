@@ -4,7 +4,7 @@ Reusable rich-text engine, flow documents, browser controls, document formats an
 
 [![npm](https://img.shields.io/npm/v/%40wieslawsoltes%2Frichtextweb)](https://www.npmjs.com/package/@wieslawsoltes/richtextweb)
 [![npm downloads](https://img.shields.io/npm/dm/%40wieslawsoltes%2Frichtextweb)](https://www.npmjs.com/package/@wieslawsoltes/richtextweb)
-[![NuGet](https://img.shields.io/nuget/v/RichTextWeb.Blazor)](https://www.nuget.org/packages/RichTextWeb.Blazor)
+[![RichTextWeb.Blazor on NuGet](https://img.shields.io/nuget/v/RichTextWeb.Blazor?label=RichTextWeb.Blazor&logo=nuget)](https://www.nuget.org/packages/RichTextWeb.Blazor)
 [![NuGet downloads](https://img.shields.io/nuget/dt/RichTextWeb.Blazor)](https://www.nuget.org/packages/RichTextWeb.Blazor)
 [![CI](https://github.com/wieslawsoltes/RichTextWeb/actions/workflows/ci.yml/badge.svg)](https://github.com/wieslawsoltes/RichTextWeb/actions/workflows/ci.yml)
 [![Blazor CI](https://github.com/wieslawsoltes/RichTextWeb/actions/workflows/blazor.yml/badge.svg)](https://github.com/wieslawsoltes/RichTextWeb/actions/workflows/blazor.yml)
