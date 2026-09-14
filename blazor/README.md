@@ -1,6 +1,6 @@
 # RichTextWeb.Blazor
 
-Install `RichTextWeb.Blazor` 0.4.0 for .NET 8/.NET 10. The package includes the actual native browser editor/format/PDF engine and local PDF worker/decoders/maps/profiles. Fonts are not distributed or implicitly downloaded.
+Install `RichTextWeb.Blazor` 0.4.1 for .NET 8/.NET 10. The package includes the actual native browser editor/format/PDF engine and local PDF worker/decoders/maps/profiles. Fonts are not distributed or implicitly downloaded.
 
 ## Editing and binding
 

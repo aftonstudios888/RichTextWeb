@@ -19,7 +19,7 @@ The [complete original guide](README.web.md) preserves JavaScript/React/MVVM usa
 ## Blazor
 
 ```sh
-dotnet add package RichTextWeb.Blazor --version 0.4.0
+dotnet add package RichTextWeb.Blazor --version 0.4.1
 ```
 
 The .NET 8/.NET 10 RCL supports interactive WebAssembly and Server, with locally packaged native rich-text/PDF assets and worker. It includes `RichTextEditor`, `RichTextPageEditor`, read-only flow viewers, `RichTextInput` with EditForm integration, format services and `PdfEditor`. Consumers need neither npm nor a CDN; fonts are not implicitly downloaded.
