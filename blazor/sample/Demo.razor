@@ -1,5 +1,5 @@
 @page "/"
-@namespace RichTextWeb.Blazor.Sample
+@namespace RichTextWebBlazorSample
 @using RichTextWeb.Blazor
 @using Microsoft.AspNetCore.Components
 @using Microsoft.AspNetCore.Components.Forms
@@ -24,6 +24,7 @@
         <PdfEditor @ref="_pdf" Theme="_theme" Ready="PdfReady" Style="display:block;height:500px" />
     }
     <output id="status">@_status</output><output id="result">@_result</output><p>@_details</p>
+    <InteropProbe />
 </main>
 @code {
     public sealed class DocumentForm { [Required] public string? Body { get; set; } = "<p>Hello from Blazor.</p>"; }
@@ -54,6 +55,10 @@
         var matches = await _pdf.FindAsync("Verified");
         var saved = await _pdf.SaveAsync();
         if (info.PageCount < 1 || matches.Length < 1 || saved.Length < 100) throw new InvalidOperationException("Native PDF loading, search or save failed.");
+        await _pdf.SetViewModeAsync("flow");
+        if ((await _pdf.GetInfoAsync()).ViewMode != "flow") throw new InvalidOperationException("PDF flow view did not initialize.");
+        await _pdf.SetViewModeAsync("pdf");
+        if ((await _pdf.GetInfoAsync()).ViewMode != "pdf") throw new InvalidOperationException("PDF source view did not restore.");
         _details = $"Measured {layout.PageCount} page(s), exported {docx.Length:N0}-byte DOCX and {pdf.Length:N0}-byte PDF, and found {matches.Length} PDF text match(es).";
         _result = "Passed";
     }

@@ -48,7 +48,7 @@ public class RichTextEditor : BrowserComponent
     }
     protected override async Task OnBrowserEventAsync(BrowserEvent notification)
     {
-        if (notification.Name == "dom:blazor-valuechange") await ApplyValueAsync(await InvokeAsync<EditorValue>("ReadBinding"));
+        if (notification.Name == "dom:blazor-valuechange") await ApplyValueAsync(await InvokeJsonAsync<EditorValue>("ReadBinding"));
         await base.OnBrowserEventAsync(notification);
     }
     private async Task ApplyValueAsync(EditorValue value)
@@ -57,18 +57,18 @@ public class RichTextEditor : BrowserComponent
         _lastBrowserRevision = value.Revision; _lastBrowserValue = value.Value;
         if (Value != value.Value) await ValueChanged.InvokeAsync(value.Value);
     }
-    public async ValueTask FlushChangesAsync() => await ApplyValueAsync(await InvokeAsync<EditorValue>("FlushChanges"));
-    public ValueTask<string> GetValueAsync(string? format = null) => InvokeAsync<string>("GetValue", format ?? ValueFormat);
+    public async ValueTask FlushChangesAsync() => await ApplyValueAsync(await InvokeJsonAsync<EditorValue>("FlushChanges"));
+    public ValueTask<string> GetValueAsync(string? format = null) => InvokeJsonAsync<string>("GetValue", format ?? ValueFormat);
     public ValueTask AppendTextAsync(string text) => InvokeVoidAsync("AppendText", text);
     public ValueTask SelectAsync(int start, int end) => InvokeVoidAsync("Select", start, end);
     public ValueTask SelectAllAsync() => InvokeVoidAsync("SelectAll");
     public ValueTask FocusAsync() => InvokeVoidAsync("Focus");
     public ValueTask UndoAsync() => InvokeVoidAsync("Undo");
     public ValueTask RedoAsync() => InvokeVoidAsync("Redo");
-    public ValueTask<JsonElement> ExecuteAsync(string command, object? parameter = null) => InvokeAsync<JsonElement>("Execute", command, parameter);
+    public ValueTask<JsonElement> ExecuteAsync(string command, object? parameter = null) => InvokeJsonAsync<JsonElement>("Execute", command, parameter);
     public ValueTask<PaginationInfo> RepaginateAsync() => InvokeAsync<PaginationInfo>("Repaginate");
     public ValueTask<bool> GoToPageAsync(int number) => InvokeAsync<bool>("GoToPage", number);
-    public ValueTask<byte[]> ExportBytesAsync(string format, object? options = null) => InvokeAsync<byte[]>("ExportBytes", format, options ?? new { });
+    public ValueTask<byte[]> ExportBytesAsync(string format, object? options = null) => InvokeBytesAsync("ExportBytes", format, options ?? new { });
     public ValueTask ImportBytesAsync(string format, byte[] bytes, object? options = null) => InvokeVoidAsync("ImportBytes", format, bytes, options ?? new { });
     public ValueTask<IJSObjectReference> GetNativeEditorAsync() => InvokeAsync<IJSObjectReference>("GetNativeEditor");
     public ValueTask<IJSObjectReference> GetDocumentAsync() => Module is not null && Control is not null ? Module.GetAsync<IJSObjectReference>(Control, "Document") : ValueTask.FromException<IJSObjectReference>(new InvalidOperationException("Wait for Ready."));
@@ -150,16 +150,17 @@ public sealed class PdfEditor : BrowserComponent
         return new() { ["kind"] = "pdf", ["source"] = Source, ["sourceRevision"] = SourceRevision, ["importOptions"] = ImportOptions, ["native"] = native, ["theme"] = Theme };
     }
     public ValueTask LoadAsync(byte[] bytes, object? options = null) => InvokeVoidAsync("Load", bytes, options ?? new { });
-    public ValueTask<byte[]> SaveAsync() => InvokeAsync<byte[]>("Save");
+    public ValueTask SetViewModeAsync(string mode) => InvokeVoidAsync("SetViewMode", mode);
+    public ValueTask<byte[]> SaveAsync() => InvokeBytesAsync("Save");
     public ValueTask<PdfInfo> GetInfoAsync() => InvokeAsync<PdfInfo>("GetInfo");
-    public ValueTask<PdfSearchMatch[]> FindAsync(string query, bool caseSensitive = false) => InvokeAsync<PdfSearchMatch[]>("Find", query, new { caseSensitive });
+    public ValueTask<PdfSearchMatch[]> FindAsync(string query, bool caseSensitive = false) => InvokeJsonAsync<PdfSearchMatch[]>("Find", query, new { caseSensitive });
     public ValueTask AddPageAsync(double? width = null, double? height = null) => InvokeVoidAsync("AddPage", width, height);
     public ValueTask InsertPagesAsync(byte[] bytes, int[]? indices = null, int? insertionIndex = null) => InvokeVoidAsync("InsertPages", bytes, indices, insertionIndex);
     public ValueTask UndoAsync() => InvokeVoidAsync("Undo");
     public ValueTask RedoAsync() => InvokeVoidAsync("Redo");
     public ValueTask FitWidthAsync() => InvokeVoidAsync("FitWidth");
     public ValueTask<IJSObjectReference> ImportToFlowDocumentAsync(object? options = null) => InvokeAsync<IJSObjectReference>("ImportToFlowDocument", options ?? new { });
-    public ValueTask<byte[]> ExportReflowAsync(object? options = null) => InvokeAsync<byte[]>("ExportReflow", options ?? new { });
+    public ValueTask<byte[]> ExportReflowAsync(object? options = null) => InvokeBytesAsync("ExportReflow", options ?? new { });
 }
 public sealed class RichTextProvider : BrowserProvider { }
 public sealed class RichTextModule(IJSRuntime js) : BrowserModule(js)
@@ -167,6 +168,6 @@ public sealed class RichTextModule(IJSRuntime js) : BrowserModule(js)
     public ValueTask<IJSObjectReference> FromTextAsync(string text) => InvokeAsync<IJSObjectReference>("fromText", [text]);
     public ValueTask<IJSObjectReference> FromHtmlAsync(string html) => InvokeAsync<IJSObjectReference>("fromHTML", [html]);
     public ValueTask<IJSObjectReference> FromDocxAsync(byte[] bytes) => InvokeAsync<IJSObjectReference>("fromDOCX", [bytes]);
-    public ValueTask<byte[]> ToDocxAsync(IJSObjectReference document) => InvokeAsync<byte[]>("toDOCX", [document]);
-    public ValueTask<byte[]> ToPdfAsync(IJSObjectReference document, object? options = null) => InvokeAsync<byte[]>("toPDF", [document, options ?? new { }]);
+    public ValueTask<byte[]> ToDocxAsync(IJSObjectReference document) => InvokeBytesAsync("toDOCX", [document]);
+    public ValueTask<byte[]> ToPdfAsync(IJSObjectReference document, object? options = null) => InvokeBytesAsync("toPDF", [document, options ?? new { }]);
 }

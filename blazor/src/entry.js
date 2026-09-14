@@ -163,9 +163,17 @@ export class PdfController extends EventTarget {
     }
     for (const [name, value] of Object.entries(options.native ?? {})) {
       if (this.Editor[name] === value) continue;
-      if (name === 'ViewMode') await this.Editor.SetViewMode(value); else this.Editor[name] = value;
+      if (name === 'ViewMode') await this.SetViewMode(value);
+      else this.Editor[name] = value;
     }
     attribute(this.Editor, 'theme', options.theme ?? 'light');
+  }
+  async SetViewMode(value) {
+    if (this.disposed) throw new Error('The PDF component has been disposed.');
+    if (value !== 'pdf' && value !== 'flow') throw new TypeError('View mode must be pdf or flow.');
+    if (value === 'flow' && !this.Editor.FlowDocument) await this.Editor.ImportToFlowDocument();
+    if (this.disposed) throw new Error('The PDF component has been disposed.');
+    this.Editor.ViewMode = value;
   }
   AddPage(width, height) { return this.Editor.AddPage(width ?? undefined, height ?? undefined); }
   InsertPages(bytes, indices, insertionIndex) { return this.Editor.InsertPages(bytes, indices ?? undefined, insertionIndex ?? undefined); }
