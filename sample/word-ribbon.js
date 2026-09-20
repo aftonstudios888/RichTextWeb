@@ -310,6 +310,18 @@ export function createDocumentRibbon({
         "H",
       ),
       tab(
+        "design",
+        "Design",
+        [
+          group("document-theme", "Document formatting", [
+            t("DocumentTheme", "Document theme", "paint", large),
+            t("ThemeColor", "Theme color", "paint"),
+            t("ThemeFont", "Theme font", "brush"),
+          ]),
+        ],
+        "G",
+      ),
+      tab(
         "insert",
         "Insert",
         [
